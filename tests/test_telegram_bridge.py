@@ -20,7 +20,7 @@ from untether.config import ProjectConfig, ProjectsConfig
 from untether.context import RunContext
 from untether.directives import parse_directives
 from untether.markdown import MarkdownPresenter
-from untether.model import ResumeToken
+from untether.model import Action, ActionEvent, ResumeToken
 from untether.progress import ProgressTracker
 from untether.router import AutoRouter, RunnerEntry
 from untether.runner_bridge import ExecBridgeConfig, RunningTask
@@ -246,6 +246,85 @@ def test_telegram_presenter_progress_shows_cancel_button() -> None:
     reply_markup = rendered.extra["reply_markup"]
     assert reply_markup["inline_keyboard"][0][0]["text"] == "cancel"
     assert reply_markup["inline_keyboard"][0][0]["callback_data"] == "untether:cancel"
+
+
+def _keyboard_action(
+    action_id: str, buttons: list[list[dict[str, str]]]
+) -> ActionEvent:
+    """Build a started `warning` action carrying an inline keyboard."""
+    return ActionEvent(
+        engine="claude",
+        action=Action(
+            id=action_id,
+            kind="warning",
+            title=action_id,
+            detail={"inline_keyboard": {"buttons": buttons}},
+        ),
+        phase="started",
+    )
+
+
+def test_telegram_presenter_progress_prefers_newest_pending_keyboard() -> None:
+    """A stale uncompleted keyboard action must not shadow a newer one (#683).
+
+    The synthetic ``claude.discuss_approve.N`` action emitted by the
+    Pause & Outline hold-open path is never completed, so an oldest-first
+    scan pinned the rendered keyboard to it for the rest of the run and
+    silently swallowed every later AskUserQuestion / approval keyboard.
+    """
+    presenter = TelegramPresenter()
+    tracker = ProgressTracker(engine="claude")
+    tracker.note_event(
+        _keyboard_action(
+            "claude.discuss_approve.3",
+            [
+                [
+                    {
+                        "text": "✅ Approve Plan",
+                        "callback_data": "claude_control:approve:r1",
+                    }
+                ]
+            ],
+        )
+    )
+    tracker.note_event(
+        _keyboard_action(
+            "claude.control.7",
+            [
+                [{"text": "Keep the branch", "callback_data": "aq:opt:0"}],
+                [{"text": "Other (type reply)", "callback_data": "aq:other"}],
+            ],
+        )
+    )
+
+    rendered = presenter.render_progress(tracker.snapshot(), elapsed_s=0.0)
+
+    keyboard = rendered.extra["reply_markup"]["inline_keyboard"]
+    assert keyboard[0][0]["callback_data"] == "aq:opt:0"
+    assert keyboard[1][0]["callback_data"] == "aq:other"
+    assert keyboard[-1][0]["text"] == "cancel"
+
+
+def test_telegram_presenter_progress_skips_completed_keyboard_actions() -> None:
+    """A completed action's keyboard is never rendered, newest or not (#683)."""
+    presenter = TelegramPresenter()
+    tracker = ProgressTracker(engine="claude")
+    tracker.note_event(
+        _keyboard_action(
+            "claude.control.2",
+            [[{"text": "✅ Approve", "callback_data": "claude_control:approve:r2"}]],
+        )
+    )
+    resolved = _keyboard_action(
+        "claude.control.9",
+        [[{"text": "✅ Approve", "callback_data": "claude_control:approve:r9"}]],
+    )
+    tracker.note_event(replace(resolved, phase="completed"))
+
+    rendered = presenter.render_progress(tracker.snapshot(), elapsed_s=0.0)
+
+    keyboard = rendered.extra["reply_markup"]["inline_keyboard"]
+    assert keyboard[0][0]["callback_data"] == "claude_control:approve:r2"
 
 
 def test_telegram_presenter_clears_button_on_cancelled() -> None:

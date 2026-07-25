@@ -4668,7 +4668,14 @@ async def test_outline_sent_strips_approval_from_progress() -> None:
             id="claude.discuss_approve.1",
             kind="warning",
             title="Plan outlined",
-            detail={"request_type": "DiscussApproval"},
+            # Production always sets inline_keyboard on this action
+            # (runners/claude.py) — the strip check now keys off the action
+            # that supplied the rendered keyboard (#683), so the fixture has
+            # to carry it too.
+            detail={
+                "request_type": "DiscussApproval",
+                "inline_keyboard": {"buttons": [[{"text": "✅ Approve Plan"}]]},
+            },
         ),
         phase="started",
     )
@@ -4695,6 +4702,142 @@ async def test_outline_sent_strips_approval_from_progress() -> None:
     kb = last_edit["message"].extra["reply_markup"]["inline_keyboard"]
     assert len(kb) == 1  # Only cancel row
     assert kb[0][0]["text"] == "Cancel"
+
+
+@pytest.mark.anyio
+async def test_later_approval_keyboard_survives_after_outline(monkeypatch) -> None:
+    """A post-outline AskUserQuestion keyboard must reach Telegram (#683).
+
+    The observed failure on nsd: after a Pause & Outline cycle the uncompleted
+    ``claude.discuss_approve.N`` action kept ``_current_is_outline`` True, so
+    the #163 strip reduced EVERY later approval keyboard to the cancel row.
+    The user saw the question text with no option buttons and the run was
+    unanswerable.
+    """
+    from untether.model import Action, ActionEvent
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    # Outline was delivered and its approval was answered → action completed.
+    edits._outline_sent = True
+    outline_detail = {
+        "request_type": "DiscussApproval",
+        "inline_keyboard": {"buttons": [[{"text": "✅ Approve Plan"}]]},
+    }
+    outline_action = Action(
+        id="claude.discuss_approve.3",
+        kind="warning",
+        title="Plan outlined",
+        detail=outline_detail,
+    )
+    edits.tracker.note_event(
+        ActionEvent(engine="claude", action=outline_action, phase="started")
+    )
+    edits.tracker.note_event(
+        ActionEvent(engine="claude", action=outline_action, phase="completed", ok=True)
+    )
+
+    # Now an AskUserQuestion arrives with option buttons.
+    edits.tracker.note_event(
+        ActionEvent(
+            engine="claude",
+            action=Action(
+                id="claude.control.7",
+                kind="warning",
+                title="❓ What next?",
+                detail={
+                    "request_type": "CanUseTool",
+                    "ask_question": "What next?",
+                    "inline_keyboard": {"buttons": [[{"text": "Keep it"}]]},
+                },
+            ),
+            phase="started",
+        )
+    )
+
+    presenter.set_approval_buttons()
+    edits.event_seq = 1
+    with contextlib.suppress(anyio.WouldBlock):
+        edits.signal_send.send_nowait(None)
+
+    async with anyio.create_task_group() as tg:
+
+        async def run_cycle() -> None:
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(run_cycle)
+
+    kb = transport.edit_calls[-1]["message"].extra["reply_markup"]["inline_keyboard"]
+    assert len(kb) > 1, "later approval keyboard was stripped to cancel-only (#683)"
+    assert kb[0][0]["text"] == "Approve"
+
+
+@pytest.mark.anyio
+async def test_lingering_outline_action_does_not_strip_newer_keyboard() -> None:
+    """Even if the DiscussApproval action never completes, a newer
+    keyboard-bearing action wins the strip check (#683 defence in depth)."""
+    from untether.model import Action, ActionEvent
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+    edits._outline_sent = True
+
+    # Deliberately left uncompleted — the exact leaked state from the incident.
+    edits.tracker.note_event(
+        ActionEvent(
+            engine="claude",
+            action=Action(
+                id="claude.discuss_approve.3",
+                kind="warning",
+                title="Plan outlined",
+                detail={
+                    "request_type": "DiscussApproval",
+                    "inline_keyboard": {"buttons": [[{"text": "✅ Approve Plan"}]]},
+                },
+            ),
+            phase="started",
+        )
+    )
+    edits.tracker.note_event(
+        ActionEvent(
+            engine="claude",
+            action=Action(
+                id="claude.control.7",
+                kind="warning",
+                title="❓ What next?",
+                detail={
+                    "request_type": "CanUseTool",
+                    "inline_keyboard": {"buttons": [[{"text": "Keep it"}]]},
+                },
+            ),
+            phase="started",
+        )
+    )
+
+    presenter.set_approval_buttons()
+    edits.event_seq = 1
+    with contextlib.suppress(anyio.WouldBlock):
+        edits.signal_send.send_nowait(None)
+
+    async with anyio.create_task_group() as tg:
+
+        async def run_cycle() -> None:
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(run_cycle)
+
+    kb = transport.edit_calls[-1]["message"].extra["reply_markup"]["inline_keyboard"]
+    assert len(kb) > 1
+    assert kb[0][0]["text"] == "Approve"
 
 
 @pytest.mark.anyio

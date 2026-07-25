@@ -2600,11 +2600,23 @@ class ProgressEdits:
             # message has the canonical approval buttons.  (#163)
             # Only strip for outline-related approvals (DiscussApproval),
             # not for regular tool approvals (e.g. Write with diff preview).
-            _current_is_outline = any(
-                a.action.detail.get("request_type") == "DiscussApproval"
-                for a in state.actions
-                if not a.completed
-            )
+            # #683: ask the action that actually SUPPLIED the rendered keyboard,
+            # not "is any uncompleted DiscussApproval action around". The
+            # synthetic claude.discuss_approve.N action used to linger
+            # uncompleted for the whole run, so this `any()` stayed True and
+            # stripped EVERY later approval keyboard down to the cancel row —
+            # an AskUserQuestion rendered its question text with no option
+            # buttons and the run was unanswerable. Matches the newest-first
+            # convention in TelegramPresenter.render_progress and
+            # _has_pending_approval.
+            _current_is_outline = False
+            for _a in reversed(state.actions):
+                if _a.completed or not _a.action.detail.get("inline_keyboard"):
+                    continue
+                _current_is_outline = (
+                    _a.action.detail.get("request_type") == "DiscussApproval"
+                )
+                break
             if self._outline_sent and has_approval and _current_is_outline:
                 cancel_row = new_kb[-1:]  # keep only the cancel row
                 rendered = RenderedMessage(
