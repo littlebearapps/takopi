@@ -379,10 +379,20 @@ def render_event_cli(event: UntetherEvent) -> list[str]:
             return []
 
 
+# #688: the minor version is OPTIONAL and bounded to 1-2 digits. The Claude 5
+# family ships major-only IDs (``claude-opus-5``), which the old mandatory
+# ``(\d+)[.-](\d+)`` could not match at all — every Claude 5 model fell through
+# to the lossy family fallback below and rendered as a bare ``opus``, silently
+# dropping both the version and the ``[1m]`` context marker. The ``(?!\d)``
+# guard is what keeps a trailing date from being read as a minor version:
+# ``claude-opus-5-20260725`` → ``opus 5``, not ``opus 5.20260725``, while
+# ``claude-opus-4-6-20260101`` still yields ``opus 4.6``.
 _CLAUDE_MODEL_RE = re.compile(
-    r"(opus|sonnet|haiku)[- ](\d+)[.-](\d+)[^\[]*(?:\[([^\]]+)\])?",
+    r"(opus|sonnet|haiku|fable)[- ](\d+)(?:[.-](\d{1,2})(?!\d))?[^\[]*(?:\[([^\]]+)\])?",
     re.IGNORECASE,
 )
+
+_CLAUDE_FAMILIES = ("opus", "sonnet", "haiku", "fable")
 
 _CONTEXT_SUFFIX_MAP: dict[str, str] = {"1m": "1M"}
 
@@ -393,16 +403,21 @@ def _short_model_name(model: str) -> str:
     ``'claude-opus-4-6'`` → ``'opus 4.6'``
     ``'claude-opus-4-6[1m]'`` → ``'opus 4.6 (1M)'``
     ``'claude-sonnet-4-5-20250929'`` → ``'sonnet 4.5'``
+    ``'claude-opus-5[1m]'`` → ``'opus 5 (1M)'`` (major-only Claude 5 IDs)
+    ``'claude-fable-5'`` → ``'fable 5'``
     """
     m = _CLAUDE_MODEL_RE.search(model)
     if m:
-        base = f"{m.group(1).lower()} {m.group(2)}.{m.group(3)}"
+        base = f"{m.group(1).lower()} {m.group(2)}"
+        minor = m.group(3)
+        if minor:
+            base = f"{base}.{minor}"
         suffix = m.group(4)
         if suffix:
             label = _CONTEXT_SUFFIX_MAP.get(suffix.lower(), suffix.upper())
             return f"{base} ({label})"
         return base
-    for family in ("opus", "sonnet", "haiku"):
+    for family in _CLAUDE_FAMILIES:
         if family in model.lower():
             return family
     if model.lower().startswith("auto-"):
