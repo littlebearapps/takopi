@@ -2285,6 +2285,14 @@ def translate_claude_event(
                         else:
                             button_request_id = f"da:{session_id}"
                             _REQUEST_TO_SESSION[button_request_id] = session_id
+                        # #683: map the button's request_id to this synthetic
+                        # action so the reconcile loop can COMPLETE it once the
+                        # user taps Approve/Deny. The early return below skips
+                        # the normal mapping at ~line 2465, so without this the
+                        # reconciler resolves no action_id, the action stays
+                        # uncompleted for the rest of the run, and its keyboard
+                        # shadowed every later approval/option keyboard.
+                        state.request_to_action[button_request_id] = synth_action_id
 
                         # Send full outline as a separate ephemeral message
                         # (progress message is limited to 4096 chars and truncates).
@@ -2397,13 +2405,20 @@ def translate_claude_event(
             # 2. Emit action_completed to clear stale inline keyboards
             # See: https://github.com/littlebearapps/untether/issues/229
             reconciled_events: list[UntetherEvent] = []
+            # #683: also sweep request_to_action, not just
+            # pending_control_requests. The Pause & Outline hold-open path
+            # returns its synthetic action early — before the request is
+            # recorded in pending_control_requests — so its action_id is only
+            # reachable here. dict.fromkeys de-dupes while preserving order.
             callback_handled = [
                 rid
-                for rid in state.pending_control_requests
+                for rid in dict.fromkeys(
+                    (*state.pending_control_requests, *state.request_to_action)
+                )
                 if rid in _HANDLED_REQUESTS
             ]
             for rid in callback_handled:
-                del state.pending_control_requests[rid]
+                state.pending_control_requests.pop(rid, None)
                 action_id_for_req = state.request_to_action.pop(rid, None)
                 if action_id_for_req:
                     # Remove from control_action_for_tool so tool_result
@@ -4727,13 +4742,25 @@ async def send_claude_control_response(
 
     # Clean up the mapping after use
     del _REQUEST_TO_SESSION[request_id]
-    # #197: LRU-evict oldest entries instead of clear()-ing the whole set.
+    mark_request_handled(request_id)
+
+    return success
+
+
+def mark_request_handled(request_id: str) -> None:
+    """Record *request_id* as answered so the reconcile loop can retire it.
+
+    The reconcile loop in ``translate`` emits ``action_completed`` for every
+    handled request it can resolve to an action id, which is what clears the
+    stale inline keyboard (#229) and, since #683, the synthetic
+    ``claude.discuss_approve.N`` action from the Pause & Outline hold-open path.
+
+    #197: LRU-evict oldest entries instead of clear()-ing the whole set.
+    """
     _HANDLED_REQUESTS[request_id] = None
     _HANDLED_REQUESTS.move_to_end(request_id)
     while len(_HANDLED_REQUESTS) > _HANDLED_REQUESTS_MAX:
         _HANDLED_REQUESTS.popitem(last=False)
-
-    return success
 
 
 def mark_outline_pending(session_id: str) -> None:

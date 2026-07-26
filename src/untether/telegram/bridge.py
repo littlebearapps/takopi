@@ -85,8 +85,16 @@ class TelegramPresenter:
             reply_markup = CLEAR_MARKUP
         else:
             # Check if any active action has inline keyboard buttons (e.g. permission approval)
+            #
+            # #683: scan NEWEST-first. Telegram renders one keyboard per
+            # message, and the newest pending request is the one the user must
+            # answer. Oldest-first let an uncompleted keyboard action — most
+            # notably the synthetic ``claude.discuss_approve.N`` emitted by the
+            # Pause & Outline hold-open path, which nothing ever completes —
+            # pin the keyboard for the rest of the run and silently swallow
+            # every later AskUserQuestion / approval keyboard.
             reply_markup = CANCEL_MARKUP
-            for action_state in state.actions:
+            for action_state in reversed(state.actions):
                 if not action_state.completed:
                     kb = action_state.action.detail.get("inline_keyboard")
                     if kb and isinstance(kb, dict) and "buttons" in kb:

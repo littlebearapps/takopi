@@ -12,6 +12,7 @@ from ...runners.claude import (
     _REQUEST_TO_SESSION,
     _REQUEST_TO_TOOL_NAME,
     mark_outline_pending,
+    mark_request_handled,
     send_claude_control_response,
 )
 from ...transport import MessageRef
@@ -176,6 +177,11 @@ class ClaudeControlCommand:
             session_id = request_id.removeprefix("da:")
             # Clean up the synthetic request registration
             _REQUEST_TO_SESSION.pop(request_id, None)
+            # #683: this button never reaches send_claude_control_response
+            # (the underlying request was already auto-denied), so mark it
+            # handled here — otherwise the reconcile loop can never complete
+            # the synthetic claude.discuss_approve.N action it belongs to.
+            mark_request_handled(request_id)
 
             # Check if session is still alive — it may have ended
             # (context exhaustion) before the user clicked the button

@@ -32,6 +32,7 @@ from untether.runners.claude import (
     ClaudeRunner,
     ClaudeStreamState,
     mark_outline_pending,
+    mark_request_handled,
     translate_claude_event,
 )
 from untether.schemas import claude as claude_schema
@@ -721,3 +722,111 @@ def test_session_cleanup_removes_synthetic_requests():
     assert f"da:{session_id}" not in _REQUEST_TO_SESSION
     assert "req_normal" not in _REQUEST_TO_SESSION
     assert session_id not in _ACTIVE_RUNNERS
+
+
+# --- #683: the synthetic action must be retirable by the reconcile loop ---
+
+
+def test_hold_open_maps_button_request_to_synthetic_action():
+    """Outline-ready hold-open must map its request_id -> synthetic action_id (#683).
+
+    The early return skips the normal ``state.request_to_action`` registration,
+    so without this mapping the reconcile loop resolves no action_id and the
+    synthetic ``claude.discuss_approve.N`` action is never completed — pinning
+    the rendered keyboard for the rest of the run.
+    """
+    state = _make_state("sess-map")
+    mark_outline_pending("sess-map")
+    state.max_text_len_since_cooldown = 300
+
+    request_id = "req_exit_plan"
+    event = _make_exit_plan_mode_request(request_id)
+    events = translate_claude_event(
+        event, title="claude", state=state, factory=state.factory
+    )
+
+    action_events = [e for e in events if isinstance(e, ActionEvent)]
+    synth_action_id = action_events[0].action.id
+    assert synth_action_id.startswith("claude.discuss_approve.")
+    assert state.request_to_action[request_id] == synth_action_id
+
+
+def test_escalation_path_maps_da_request_to_synthetic_action():
+    """The da: escalation variant also needs the action mapping (#683)."""
+    state = _make_state("sess-esc-map")
+    mark_outline_pending("sess-esc-map")
+    state.max_text_len_since_cooldown = 50  # below threshold
+
+    event = _make_exit_plan_mode_request("req_exit_plan")
+    events = translate_claude_event(
+        event, title="claude", state=state, factory=state.factory
+    )
+
+    action_events = [e for e in events if isinstance(e, ActionEvent)]
+    synth_action_id = action_events[0].action.id
+    assert state.request_to_action["da:sess-esc-map"] == synth_action_id
+
+
+def test_reconcile_completes_synthetic_discuss_approve_action():
+    """Once the button is answered, the next control_request retires the action (#683).
+
+    This is the exact incident sequence: approve the held-open outline, then an
+    AskUserQuestion arrives. The batch must carry an ``action_completed`` for
+    the synthetic action so its stale keyboard stops being rendered.
+    """
+    state = _make_state("sess-recon")
+    mark_outline_pending("sess-recon")
+    state.max_text_len_since_cooldown = 300
+
+    held_id = "req_exit_plan"
+    synth_events = translate_claude_event(
+        _make_exit_plan_mode_request(held_id),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    synth_action_id = next(
+        e.action.id for e in synth_events if isinstance(e, ActionEvent)
+    )
+
+    # User taps Approve — send_claude_control_response marks it handled.
+    mark_request_handled(held_id)
+
+    ask_event = claude_schema.StreamControlRequest(
+        request_id="req_ask",
+        request=claude_schema.ControlCanUseToolRequest(
+            tool_name="AskUserQuestion",
+            input={
+                "questions": [
+                    {
+                        "question": "What next?",
+                        "options": [{"label": "Keep it"}, {"label": "Drop it"}],
+                    }
+                ]
+            },
+        ),
+    )
+    events = translate_claude_event(
+        ask_event, title="claude", state=state, factory=state.factory
+    )
+
+    completed = [
+        e
+        for e in events
+        if isinstance(e, ActionEvent)
+        and e.phase == "completed"
+        and e.action.id == synth_action_id
+    ]
+    assert completed, "synthetic discuss_approve action was never completed"
+    assert held_id not in state.pending_control_requests
+    assert held_id not in state.request_to_action
+
+    # ...and the ask action carries the option buttons.
+    ask_actions = [
+        e
+        for e in events
+        if isinstance(e, ActionEvent) and e.action.id.startswith("claude.control.")
+    ]
+    assert ask_actions
+    buttons = ask_actions[0].action.detail["inline_keyboard"]["buttons"]
+    assert buttons[0][0]["callback_data"] == "aq:opt:0"
