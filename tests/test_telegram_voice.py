@@ -188,14 +188,21 @@ class _Transcriber:
     def __init__(self, *, result: str | None = None, error: Exception | None = None):
         self.calls: list[tuple[str, bytes]] = []
         self.languages: list[str | None] = []
+        self.prompts: list[str | None] = []
         self._result = result
         self._error = error
 
     async def transcribe(
-        self, *, model: str, audio_bytes: bytes, language: str | None = None
+        self,
+        *,
+        model: str,
+        audio_bytes: bytes,
+        language: str | None = None,
+        prompt: str | None = None,
     ) -> str:
         self.calls.append((model, audio_bytes))
         self.languages.append(language)
+        self.prompts.append(prompt)
         if self._error is not None:
             raise self._error
         assert self._result is not None
@@ -364,6 +371,7 @@ async def test_transcribe_voice_success() -> None:
     assert transcriber.calls
     # No language configured → no hint forwarded (auto-detect preserved)
     assert transcriber.languages == [None]
+    assert transcriber.prompts == [None]
 
 
 @pytest.mark.anyio
@@ -390,6 +398,29 @@ async def test_transcribe_voice_passes_language_hint() -> None:
 
     assert result == "Continue"
     assert transcriber.languages == ["en"]
+
+
+@pytest.mark.anyio
+async def test_transcribe_voice_passes_vocabulary_prompt() -> None:
+    replies: list[str] = []
+
+    async def reply(**kwargs) -> None:
+        replies.append(kwargs["text"])
+
+    transcriber = _Transcriber(result="Deploy Qdrant with Bernstein")
+    bot = _Bot(file_info=File(file_path="voice.ogg"), audio=b"ok")
+    result = await transcribe_voice(
+        bot=bot,
+        msg=_voice_message(file_size=2),
+        enabled=True,
+        model="whisper-1",
+        reply=reply,
+        transcriber=transcriber,
+        prompt="Qdrant, Bernstein",
+    )
+
+    assert result == "Deploy Qdrant with Bernstein"
+    assert transcriber.prompts == ["Qdrant, Bernstein"]
 
 
 @pytest.mark.anyio

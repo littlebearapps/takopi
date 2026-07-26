@@ -300,6 +300,31 @@ def test_voice_transcription_language_default_none(tmp_path: Path) -> None:
     assert settings.transports.telegram.voice_transcription_language is None
 
 
+def test_voice_transcription_prompt_normalised(tmp_path: Path) -> None:
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "tok"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n"
+        'voice_transcription_prompt = "  Qdrant, Bernstein  "\n',
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert settings.transports.telegram.voice_transcription_prompt == "Qdrant, Bernstein"
+
+
+def test_voice_transcription_prompt_default_none(tmp_path: Path) -> None:
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n'
+        "allow_any_user = true\n",
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert settings.transports.telegram.voice_transcription_prompt is None
+
+
 def test_voice_transcription_language_rejects_non_iso_code(tmp_path: Path) -> None:
     """#638: a typo like 'english' fails at boot, not silently at the API."""
     config_path = tmp_path / "untether.toml"

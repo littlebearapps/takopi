@@ -2464,6 +2464,7 @@ async def run_main_loop(
                             cfg.voice_transcription_url_allowlist
                         ),
                         language=cfg.voice_transcription_language,
+                        prompt=cfg.voice_transcription_prompt,
                     )
                     if text is None:
                         return

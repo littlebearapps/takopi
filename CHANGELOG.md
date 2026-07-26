@@ -2,6 +2,10 @@
 
 ## v0.35.5 (unreleased)
 
+### features
+
+- **feat(telegram):** add hot-reloadable `voice_transcription_prompt`, forwarding a short vocabulary/context hint to OpenAI-compatible transcription providers for project names and technical terms [#691](https://github.com/littlebearapps/untether/issues/691)
+
 ### fixes
 
 - **fix(markdown):** render Claude 5 model IDs correctly in the run footer. The Opus 5 release (2026-07-25) introduced **major-only version IDs** (`claude-opus-5`) and a new **`fable`** family, both of which defeated `_short_model_name`'s `(opus|sonnet|haiku)[- ](\d+)[.-](\d+)` regex — it required a two-part version and did not know `fable`, so every Claude 5 model fell through to the lossy family fallback. Observed live on nsd `0.35.4`: the `blogs` chat footer read `claude-fable-5 · plan` with the raw model ID instead of `fable 5 · plan`. Two arms were worse than cosmetic — `claude-opus-5[1m]` rendered as bare `opus`, **silently dropping the 1M-context marker** so a 1M run was indistinguishable from a standard one, and a dated ID rendered its date as a fake minor version (`claude-opus-5-20260725` → `opus 5.20260725`). The minor version is now optional and bounded to 1–2 digits with a `(?!\d)` lookahead, which is what keeps a trailing date from being read as a minor while `claude-opus-4-6-20260101` still yields `opus 4.6`; `fable` joins the family group and the bare-family fallback. Blast radius was display-only — `_short_model_name` has a single caller, `format_meta_line()`, and no routing, cost or approval logic reads it. Ruled out in the same pass: no new SDK/CLI event shapes are rejected (7 days of nsd `jsonl.msgspec.invalid` are 100% the known-benign `tool_progress` signature, #639), no hardcoded model lists exist in `/model` or `/config`, and `/usage` still parses the live `seven_day_opus`/`seven_day_sonnet` buckets. 7 new tests in `tests/test_meta_line.py`, with the 18 pre-existing assertions kept untouched as the Claude 4 regression guard [#688](https://github.com/littlebearapps/untether/issues/688)
