@@ -307,7 +307,7 @@ def _read_darwin_process_table() -> (
     is accumulated user+system CPU.
     """
     try:
-        out = subprocess.run(  # fixed argv, no shell
+        out = subprocess.run(  # nosec B603 — fixed argv, no shell
             ["/bin/ps", "-axo", "pid=,ppid=,state=,time=,rss="],
             capture_output=True,
             text=True,
