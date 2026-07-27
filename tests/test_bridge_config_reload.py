@@ -71,6 +71,7 @@ class TestUpdateFrom:
             voice_transcription_api_key="sk-new",
             voice_show_transcription=False,
             voice_transcription_language="EN",
+            voice_transcription_prompt=" Trello, Untether ",
             show_resume_line=False,
             forward_coalesce_s=3.5,
             media_group_debounce_s=2.5,
@@ -85,6 +86,8 @@ class TestUpdateFrom:
         assert cfg.voice_transcription_base_url == "https://x/v1"
         # #638: hot-reloadable, normalised to lowercase at parse time
         assert cfg.voice_transcription_language == "en"
+        # #691: hot-reloadable, stripped at parse time
+        assert cfg.voice_transcription_prompt == "Trello, Untether"
         # #378: SecretStr — compare via .get_secret_value() since equality
         # against a bare str returns False.
         assert cfg.voice_transcription_api_key is not None

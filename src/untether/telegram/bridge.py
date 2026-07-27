@@ -185,6 +185,8 @@ class TelegramBridgeConfig:
     voice_transcription_api_key: SecretStr | None = None
     # #638: optional ISO-639-1 hint forwarded to the transcription API.
     voice_transcription_language: str | None = None
+    # #691: optional vocabulary-bias prompt forwarded to the STT API.
+    voice_transcription_prompt: str | None = None
     voice_show_transcription: bool = True
     # #381: CIDR/IP allowlist strings for the voice base_url SSRF check.
     voice_transcription_url_allowlist: tuple[str, ...] = ()
@@ -219,6 +221,7 @@ class TelegramBridgeConfig:
         self.voice_transcription_base_url = settings.voice_transcription_base_url
         self.voice_transcription_api_key = settings.voice_transcription_api_key
         self.voice_transcription_language = settings.voice_transcription_language
+        self.voice_transcription_prompt = settings.voice_transcription_prompt
         self.voice_show_transcription = bool(settings.voice_show_transcription)
         self.voice_transcription_url_allowlist = tuple(
             settings.voice_transcription_url_allowlist

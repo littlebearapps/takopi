@@ -6406,3 +6406,213 @@ def test_654_session_linger_info_reads_registries() -> None:
     finally:
         _SESSION_STDIN.pop(sid, None)
         _SESSION_BG_STATE.pop(sid, None)
+
+
+# ---------------------------------------------------------------------------
+# #692: subscription-cap reset harvested from result-error text
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def clean_reset_latch(monkeypatch):
+    """Isolate the module-level reset latch and pin the latch key."""
+    from untether.runners import claude as claude_mod
+
+    monkeypatch.setattr(claude_mod, "_RATE_LIMIT_RESET_LATCH", {})
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    return claude_mod._RATE_LIMIT_RESET_LATCH
+
+
+def _reset_text_at(dt) -> str:
+    """Build the upstream error string for a UTC wall-clock datetime."""
+    hour12 = dt.hour % 12 or 12
+    ampm = "am" if dt.hour < 12 else "pm"
+    return (
+        f"You've hit your session limit · resets {hour12}:{dt.minute:02d}{ampm} (UTC)"
+    )
+
+
+def test_parse_reset_clause_future_time() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from untether.runners.claude import _parse_rate_limit_reset_clause
+
+    target = datetime.now(UTC) + timedelta(hours=2)
+    parsed = _parse_rate_limit_reset_clause(_reset_text_at(target))
+    assert parsed is not None
+    wait_s, display = parsed
+    # Within a minute of 2h (seconds are floored off the clause).
+    assert 2 * 3600 - 90 < wait_s <= 2 * 3600 + 5
+    assert "(UTC)" in display
+
+
+def test_parse_reset_clause_rolls_to_next_day() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from untether.runners.claude import _parse_rate_limit_reset_clause
+
+    target = datetime.now(UTC) - timedelta(minutes=10)
+    parsed = _parse_rate_limit_reset_clause(_reset_text_at(target))
+    assert parsed is not None
+    wait_s, _ = parsed
+    # ~23h50m away after the next-day roll.
+    assert 23 * 3600 < wait_s <= 24 * 3600
+
+
+def test_parse_reset_clause_just_expired_returns_none() -> None:
+    from datetime import UTC, datetime
+
+    from untether.runners.claude import _parse_rate_limit_reset_clause
+
+    # "resets 5:30pm" parsed at 5:30:NN pm — same minute, just expired;
+    # must NOT roll ~24h forward.
+    now = datetime.now(UTC)
+    assert _parse_rate_limit_reset_clause(_reset_text_at(now)) is None
+
+
+def test_parse_reset_clause_fail_closed_variants() -> None:
+    from untether.runners.claude import _parse_rate_limit_reset_clause
+
+    # No timezone → unresolvable clock → no latch.
+    assert _parse_rate_limit_reset_clause("resets 5:30pm") is None
+    # Unknown timezone.
+    assert _parse_rate_limit_reset_clause("resets 5:30pm (Mars/Olympus)") is None
+    # Invalid hour.
+    assert _parse_rate_limit_reset_clause("resets 13:30pm (UTC)") is None
+    # No clause at all / empty / None.
+    assert _parse_rate_limit_reset_clause("You've hit your session limit") is None
+    assert _parse_rate_limit_reset_clause("") is None
+    assert _parse_rate_limit_reset_clause(None) is None
+
+
+def test_parse_reset_clause_uppercase_and_no_minutes() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from untether.runners.claude import _parse_rate_limit_reset_clause
+
+    target = (datetime.now(UTC) + timedelta(hours=3)).replace(minute=0)
+    hour12 = target.hour % 12 or 12
+    ampm = "AM" if target.hour < 12 else "PM"
+    parsed = _parse_rate_limit_reset_clause(f"Limit hit · resets {hour12}{ampm} (UTC)")
+    assert parsed is not None
+    wait_s, _ = parsed
+    assert 0 < wait_s <= 4 * 3600
+
+
+def test_format_wait_approx_rounds_up() -> None:
+    from untether.runners.claude import _format_wait_approx
+
+    assert _format_wait_approx(30) == "~1 min"
+    assert _format_wait_approx(90) == "~2 min"
+    assert _format_wait_approx(33 * 60) == "~33 min"
+    assert _format_wait_approx(2 * 3600) == "~2h"
+    assert _format_wait_approx(2 * 3600 + 5 * 60) == "~2h 5m"
+
+
+def test_result_error_latches_reset_and_bare_events_use_it(
+    clean_reset_latch,
+) -> None:
+    """#692 end-to-end: an is_error result carrying the reset clause latches
+    the deadline; a subsequent bare rate_limit_event renders the honest
+    wait instead of the ~60s guess, and repeated bare events sharing the
+    latch accumulate only the extension, not the full window each time."""
+    import time as _time
+    from datetime import UTC, datetime, timedelta
+
+    state = ClaudeStreamState()
+    target = datetime.now(UTC) + timedelta(minutes=33)
+    result_event = {
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": True,
+        "num_turns": 10,
+        "duration_ms": 450000,
+        "duration_api_ms": 420000,
+        "session_id": "cap-session-1",
+        "result": _reset_text_at(target),
+    }
+    translate_claude_event(
+        _decode_event(result_event),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    # Latched on the state for post-result stall context…
+    assert state.awaiting_rate_limit_retry() is True
+    assert state.rate_limit_wait_until - _time.monotonic() > 25 * 60
+    # …and process-wide for the NEXT run's bare events.
+    assert clean_reset_latch
+
+    state2 = ClaudeStreamState()
+    events = translate_claude_event(
+        _decode_event({"type": "rate_limit_event"}),
+        title="claude",
+        state=state2,
+        factory=state2.factory,
+    )
+    title = events[0].action.title
+    assert "Rate limited until" in title
+    assert "(UTC)" in title
+    assert "min)" in title
+    # NOT the bare-default copy.
+    assert "waiting to retry (~60s)" not in title
+    first_total = state2.rate_limit_total_s
+    assert first_total > 25 * 60
+
+    # A second bare event against the same latch must not double-count.
+    translate_claude_event(
+        _decode_event({"type": "rate_limit_event"}),
+        title="claude",
+        state=state2,
+        factory=state2.factory,
+    )
+    assert state2.rate_limit_count == 2
+    assert state2.rate_limit_total_s - first_total < 5.0
+
+
+def test_bare_event_without_latch_keeps_default(clean_reset_latch) -> None:
+    """#657 regression guard: no latch → the conservative 60s default."""
+    from untether.runners.claude import DEFAULT_BARE_RATE_LIMIT_WAIT_S
+
+    state = ClaudeStreamState()
+    events = translate_claude_event(
+        _decode_event({"type": "rate_limit_event"}),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "waiting to retry" in events[0].action.title
+    assert state.rate_limit_total_s == DEFAULT_BARE_RATE_LIMIT_WAIT_S
+
+
+def test_expired_latch_pruned(clean_reset_latch) -> None:
+    import time as _time
+
+    from untether.runners import claude as claude_mod
+
+    clean_reset_latch["default"] = (_time.monotonic() - 5.0, "5:30pm (UTC)")
+    assert claude_mod._latched_rate_limit_reset() is None
+    assert clean_reset_latch == {}
+
+
+def test_ok_result_does_not_latch(clean_reset_latch) -> None:
+    """A successful result mentioning 'resets' text must not arm the latch
+    (only error results are harvested)."""
+    state = ClaudeStreamState()
+    result_event = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "num_turns": 2,
+        "duration_ms": 5000,
+        "duration_api_ms": 4000,
+        "session_id": "ok-session",
+        "result": "Done. FYI quota resets 5:30pm (Australia/Melbourne).",
+    }
+    translate_claude_event(
+        _decode_event(result_event),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert clean_reset_latch == {}

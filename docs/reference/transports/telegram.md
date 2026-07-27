@@ -48,6 +48,7 @@ Configuration (under `[transports.telegram]`):
     voice_transcription_api_key = "local" # optional
     voice_transcription_url_allowlist = ["127.0.0.0/8"] # required for a loopback/private base_url (SSRF guard, #381)
     voice_transcription_language = "en" # optional ISO-639-1 hint
+    voice_transcription_prompt = "Trello, Untether, Claude Code" # optional vocabulary bias
     ```
 
 Set `OPENAI_API_KEY` in the environment (or `voice_transcription_api_key` in config).
@@ -66,6 +67,15 @@ If your voice notes are always in one language, set `voice_transcription_languag
 to an ISO-639-1 code (for example, `en`). This is passed as the Whisper `language`
 parameter and prevents wrong-language transcriptions on short utterances. Unset,
 the provider auto-detects the language.
+
+If transcription keeps mangling domain proper nouns ("trollo" → Trello), set
+`voice_transcription_prompt` to a short comma-separated list of your project and
+tool names ([#691](https://github.com/littlebearapps/untether/issues/691)). It is
+passed as the transcription `prompt` parameter (vocabulary/context bias). Keep it
+to genuinely high-frequency nouns — provider prompt windows are token-capped
+(~224 tokens for Whisper), the effect is model-dependent, and an overstuffed
+prompt can induce hallucinated terms on short or silent clips. Unset, the
+parameter is omitted entirely.
 
 ### Trigger mode (mentions-only)
 

@@ -200,12 +200,13 @@ Key test files:
 - `test_exec_bridge.py` — 270 tests: ephemeral notification cleanup, approval push notifications, progressive stall warnings, stall diagnostics, stall auto-cancel with CPU-active suppression (sleeping-process aware), tool-active repeat suppression, approval-aware stall threshold, MCP tool stall threshold, frozen ring buffer hung escalation, session summary, PID/stream threading, auto-continue detection, signal death suppression, Type-A stream-idle auto-retry (#572), empty-resume quarantine-and-fresh recovery, resume divert/clear, empty-result diagnostics
 - `test_ask_user_question.py` — 35 tests: AskUserQuestion control request handling, question extraction, pending request registry, answer routing, option button rendering, multi-question flows, structured answer responses, ask mode toggle auto-deny
 - `test_diff_preview.py` — 14 tests: Edit diff display, Write content preview, Bash command display, line/char truncation
-- `test_cost_tracker.py` — 12 tests: cost accumulation, per-run/daily budget thresholds, warning levels, daily reset, auto-cancel flag
+- `test_cost_tracker.py` — 17 tests: cost accumulation, per-run/daily budget thresholds, warning levels, daily reset, auto-cancel flag, one-shot `config.cost_visibility_gap` warning (#658)
 - `test_export_command.py` — 16 tests: session event recording, markdown/JSON export formatting, usage integration, session trimming
 - `test_browse_command.py` — 39 tests: path registry, directory listing, file preview, inline keyboard buttons, project-aware root resolution, security (path traversal)
 - `test_meta_line.py` — 54 tests: model name shortening, meta line formatting, ProgressTracker meta storage/snapshot, footer ordering (context/meta/resume)
 - `test_runner_utils.py` — 34 tests: error formatting helpers, drain_stderr capture, enriched error messages, stderr sanitisation
-- `test_shutdown.py` — 4 tests: shutdown state transitions, idempotency, reset
+- `test_shutdown.py` — 19 tests: shutdown state transitions, idempotency, reset, evidence-gated drain-timeout selection, self-restart argv matcher + descendant evidence scan (#690)
+- `test_drain_notify.py` — 15 tests: drain start/timeout notices, per-chat dedupe, forum-topic thread routing + (channel, thread) dedupe (#665)
 - `test_preamble.py` — 6 tests: default preamble injection, disabled preamble, custom text override, empty text disables, settings defaults
 - `test_restart_command.py` — 3 tests: command triggers shutdown, idempotent response, command id
 - `test_cooldown_bypass.py` — 24 tests: outline gate (hold-open with outline, auto-deny without), plan-input gate on plan-file CLIs (#659), no-text auto-deny, hold-open outline flow (#570 retired the time-based cooldown escalation)
@@ -213,7 +214,7 @@ Key test files:
 - `test_verbose_command.py` — 7 tests: /verbose toggle on/off/clear, backend id
 - `test_config_command.py` — 240 tests: home page, plan mode/ask mode/verbose/engine/listen/model/reasoning sub-pages, toggle actions, callback vs command routing, button layout, engine-aware visibility, default resolution
 - `test_pi_compaction.py` — 6 tests: compaction start/end, aborted, no tokens, sequence
-- `test_proc_diag.py` — 24 tests: format_diag, is_cpu_active, collect_proc_diag (Linux /proc reads), ProcessDiag defaults
+- `test_proc_diag.py` — 56 tests: format_diag, is_cpu_active, collect_proc_diag (Linux /proc reads), ProcessDiag defaults, macOS ps backend (TIME parser, process table, tree CPU, dispatch — #689), read_cmdline_argv
 - `test_exec_runner.py` — 22 tests: event tracking (event_count, recent_events ring buffer, PID in StartedEvent meta), JsonlStreamState defaults
 - `test_build_args.py` — 42 tests: CLI argument construction for all 6 engines, model/reasoning/permission flags
 - `test_telegram_files.py` — 17 tests: file helpers, deduplication, deny globs, default upload paths

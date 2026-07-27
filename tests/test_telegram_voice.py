@@ -188,14 +188,21 @@ class _Transcriber:
     def __init__(self, *, result: str | None = None, error: Exception | None = None):
         self.calls: list[tuple[str, bytes]] = []
         self.languages: list[str | None] = []
+        self.prompts: list[str | None] = []
         self._result = result
         self._error = error
 
     async def transcribe(
-        self, *, model: str, audio_bytes: bytes, language: str | None = None
+        self,
+        *,
+        model: str,
+        audio_bytes: bytes,
+        language: str | None = None,
+        prompt: str | None = None,
     ) -> str:
         self.calls.append((model, audio_bytes))
         self.languages.append(language)
+        self.prompts.append(prompt)
         if self._error is not None:
             raise self._error
         assert self._result is not None
@@ -390,6 +397,96 @@ async def test_transcribe_voice_passes_language_hint() -> None:
 
     assert result == "Continue"
     assert transcriber.languages == ["en"]
+
+
+@pytest.mark.anyio
+async def test_transcribe_voice_passes_vocabulary_prompt() -> None:
+    """#691: a configured voice_transcription_prompt is forwarded to the
+    transcriber so the decoder is biased toward domain proper nouns
+    ('trollo' → Trello)."""
+    replies: list[str] = []
+
+    async def reply(**kwargs) -> None:
+        replies.append(kwargs["text"])
+
+    transcriber = _Transcriber(result="Update the Trello cards")
+    bot = _Bot(file_info=File(file_path="voice.ogg"), audio=b"ok")
+    result = await transcribe_voice(
+        bot=bot,
+        msg=_voice_message(file_size=2),
+        enabled=True,
+        model="whisper-1",
+        reply=reply,
+        transcriber=transcriber,
+        prompt="Trello, Untether, Claude Code",
+    )
+
+    assert result == "Update the Trello cards"
+    assert transcriber.prompts == ["Trello, Untether, Claude Code"]
+    # No prompt configured → None forwarded → the SDK kwarg is omitted.
+    transcriber2 = _Transcriber(result="ok")
+    bot2 = _Bot(file_info=File(file_path="voice.ogg"), audio=b"ok")
+    await transcribe_voice(
+        bot=bot2,
+        msg=_voice_message(file_size=2),
+        enabled=True,
+        model="whisper-1",
+        reply=reply,
+        transcriber=transcriber2,
+    )
+    assert transcriber2.prompts == [None]
+
+
+@pytest.mark.anyio
+async def test_openai_transcriber_omits_unset_prompt_kwarg() -> None:
+    """#691: some OpenAI-compatible endpoints 400 on unknown multipart
+    fields — `prompt` must be absent from the request when unset, and
+    present verbatim when configured (same contract as #638's language)."""
+    from untether.telegram.voice import OpenAIVoiceTranscriber
+
+    captured: list[dict] = []
+
+    class _FakeTranscriptions:
+        async def create(self, **kwargs):
+            captured.append(kwargs)
+
+            class _Resp:
+                text = "ok"
+
+            return _Resp()
+
+    class _FakeAudio:
+        transcriptions = _FakeTranscriptions()
+
+    class _FakeClient:
+        audio = _FakeAudio()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    transcriber = OpenAIVoiceTranscriber()
+    import untether.telegram.voice as voice_mod
+
+    orig = voice_mod.AsyncOpenAI
+    voice_mod.AsyncOpenAI = lambda **kwargs: _FakeClient()  # type: ignore[assignment]
+    try:
+        await transcriber.transcribe(model="whisper-1", audio_bytes=b"x")
+        await transcriber.transcribe(
+            model="whisper-1",
+            audio_bytes=b"x",
+            language="en",
+            prompt="Trello, Untether",
+        )
+    finally:
+        voice_mod.AsyncOpenAI = orig  # type: ignore[assignment]
+
+    assert "prompt" not in captured[0]
+    assert "language" not in captured[0]
+    assert captured[1]["prompt"] == "Trello, Untether"
+    assert captured[1]["language"] == "en"
 
 
 @pytest.mark.anyio

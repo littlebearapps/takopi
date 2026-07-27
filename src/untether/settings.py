@@ -166,6 +166,12 @@ class TelegramTransportSettings(BaseModel):
     # stops Whisper-family models mis-guessing the language on short
     # utterances ('Continue' → '계속').
     voice_transcription_language: NonEmptyStr | None = None
+    # #691: optional vocabulary-bias prompt forwarded to the STT API — steers
+    # the decoder toward domain proper nouns ('trollo' → Trello). Unset =
+    # omit the parameter entirely (provider default behaviour). Effect is
+    # model-dependent; keep it to genuinely high-frequency nouns — an
+    # overstuffed prompt can induce hallucinated terms on short clips.
+    voice_transcription_prompt: NonEmptyStr | None = None
     voice_show_transcription: bool = True
     # #381: optional SSRF allowlist (CIDR / bare-IP strings) for
     # voice_transcription_base_url — lets operators opt in to private endpoints
@@ -224,6 +230,25 @@ class TelegramTransportSettings(BaseModel):
                 "be sent in an HTTP Authorization header"
             ) from exc
         return SecretStr(key)
+
+    @field_validator("voice_transcription_prompt", mode="after")
+    @classmethod
+    def _validate_voice_prompt(cls, v: str | None) -> str | None:
+        """#691: strip; empty → None (omit the API parameter). Reject rather
+        than silently truncate past 1000 chars — provider prompt windows are
+        token-capped (~224 for Whisper) and invisible truncation would change
+        the configured bias without telling the operator."""
+        if v is None:
+            return None
+        prompt = v.strip()
+        if not prompt:
+            return None
+        if len(prompt) > 1000:
+            raise ValueError(
+                "voice_transcription_prompt must be ≤1000 characters "
+                f"(got {len(prompt)}); keep it to high-frequency domain nouns"
+            )
+        return prompt
 
     @field_validator("voice_transcription_language", mode="after")
     @classmethod
