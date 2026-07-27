@@ -1,13 +1,16 @@
-"""Process diagnostics via /proc (Linux only).
+"""Process diagnostics via platform process APIs.
 
 Collects CPU, memory, TCP, FD, and child process info for stall analysis.
-Returns None on non-Linux platforms or when /proc is unavailable.
+Linux reads /proc; macOS shells out to `ps` (#689 — a partial backend
+supplying state + CPU ticks, enough to drive the liveness gates). Other
+platforms return None.
 """
 
 from __future__ import annotations
 
 import contextlib
 import os
+import subprocess
 import sys
 from dataclasses import dataclass, field
 
@@ -16,9 +19,9 @@ from dataclasses import dataclass, field
 class ProcessDiag:
     pid: int
     alive: bool
-    state: str | None = None  # R/S/D/Z from /proc/pid/stat
-    cpu_utime: int | None = None  # user CPU ticks
-    cpu_stime: int | None = None  # system CPU ticks
+    state: str | None = None  # R/S/D/Z (/proc) or R/S/I/T/U/Z (BSD ps)
+    cpu_utime: int | None = None  # user CPU ticks (Darwin: combined user+sys)
+    cpu_stime: int | None = None  # system CPU ticks (Darwin: always 0)
     rss_kb: int | None = None  # VmRSS
     threads: int | None = None  # thread count
     fd_count: int | None = None  # open file descriptors
@@ -33,8 +36,12 @@ def _is_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        # #689: EPERM from kill(pid, 0) means the process exists but we may
+        # not signal it — that's alive, not dead.
+        return True
 
 
 def _read_stat(pid: int) -> tuple[str | None, int | None, int | None]:
@@ -168,6 +175,27 @@ def read_cmdline(pid: int) -> str | None:
     return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
 
 
+def read_cmdline_argv(pid: int) -> list[str] | None:
+    """Return /proc/<pid>/cmdline as an argv list, or None.
+
+    #690: the self-restart drain evidence scan matches parsed argv tokens
+    (executable basename + exact verb + unit name), not substrings — a
+    space-joined string (``read_cmdline``) can't distinguish
+    ``systemctl restart untether`` from ``echo "systemctl restart untether"``.
+    Returns None on non-Linux platforms, missing PIDs, or permission errors.
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read()
+    except (OSError, FileNotFoundError, PermissionError):
+        return None
+    if not raw:
+        return None
+    return [
+        part.decode("utf-8", errors="replace") for part in raw.split(b"\x00") if part
+    ]
+
+
 def _find_children(pid: int) -> list[int]:
     """Find child PIDs via /proc/pid/task/*/children."""
     children: list[int] = []
@@ -231,8 +259,154 @@ def _collect_tree_cpu(
     return tree_utime, tree_stime
 
 
+def _parse_ps_time(raw: str) -> int | None:
+    """Parse BSD ps TIME (``M:SS.cc``, ``H:MM:SS``, ``D-HH:MM:SS``) into
+    centiseconds. Integer arithmetic only — the format switch from
+    minutes/centiseconds to hours/whole-seconds must not introduce a unit
+    discontinuity. Returns None on any malformed value."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    days = 0
+    if "-" in raw:
+        day_part, _, raw = raw.partition("-")
+        if not day_part.isdigit():
+            return None
+        days = int(day_part)
+    parts = raw.split(":")
+    if not 2 <= len(parts) <= 3:
+        return None
+    sec_part = parts[-1]
+    centis = 0
+    if "." in sec_part:
+        sec_str, _, frac = sec_part.partition(".")
+        if not frac.isdigit():
+            return None
+        centis = int(frac[:2].ljust(2, "0"))
+    else:
+        sec_str = sec_part
+    if not sec_str.isdigit() or not all(p.isdigit() for p in parts[:-1]):
+        return None
+    secs = int(sec_str)
+    if len(parts) == 3:
+        hours, minutes = int(parts[0]), int(parts[1])
+    else:
+        hours, minutes = 0, int(parts[0])
+    total_s = ((days * 24 + hours) * 60 + minutes) * 60 + secs
+    return total_s * 100 + centis
+
+
+def _read_darwin_process_table() -> (
+    dict[int, tuple[int, str | None, int | None, int | None]] | None
+):
+    """One ``ps`` call for the whole process table (#689).
+
+    Returns ``pid -> (ppid, state, cpu_centis, rss_kb)`` or None when ps
+    itself fails. A malformed row is skipped rather than disabling
+    diagnostics for every target. Darwin's ``rss`` keyword is KiB; ``time``
+    is accumulated user+system CPU.
+    """
+    try:
+        out = subprocess.run(  # fixed argv, no shell
+            ["/bin/ps", "-axo", "pid=,ppid=,state=,time=,rss="],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            env={**os.environ, "LC_ALL": "C"},
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0 or not out.stdout:
+        return None
+    table: dict[int, tuple[int, str | None, int | None, int | None]] = {}
+    for line in out.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 5:
+            continue
+        try:
+            row_pid = int(fields[0])
+            row_ppid = int(fields[1])
+        except ValueError:
+            continue
+        state = fields[2][:1] or None
+        cpu = _parse_ps_time(fields[3])
+        try:
+            rss: int | None = int(fields[4])
+        except ValueError:
+            rss = None
+        table[row_pid] = (row_ppid, state, cpu, rss)
+    return table or None
+
+
+def _collect_darwin_proc_diag(pid: int) -> ProcessDiag | None:
+    """macOS backend for collect_proc_diag (#689) — state + CPU ticks + tree,
+    the fields the #653/#655 liveness gates need. fd/TCP stay unknown."""
+    if not _is_alive(pid):
+        return ProcessDiag(pid=pid, alive=False)
+    table = _read_darwin_process_table()
+    if table is None:
+        return None
+    row = table.get(pid)
+    if row is None:
+        # Died between the liveness probe and the ps snapshot — or ps hid it.
+        if not _is_alive(pid):
+            return ProcessDiag(pid=pid, alive=False)
+        return None
+    _, state, cpu, rss_kb = row
+    children_by_ppid: dict[int, list[int]] = {}
+    for row_pid, (row_ppid, *_rest) in table.items():
+        children_by_ppid.setdefault(row_ppid, []).append(row_pid)
+    children = sorted(children_by_ppid.get(pid, []))
+    # Depth-capped descendant walk matching find_descendants (levels 1-4).
+    descendants: list[int] = []
+    seen: set[int] = {pid, *children}
+    frontier = list(children)
+    depth = 1
+    while frontier and depth <= 4:
+        descendants.extend(frontier)
+        if depth == 4:
+            break
+        next_frontier: list[int] = []
+        for child in frontier:
+            for grandchild in sorted(children_by_ppid.get(child, [])):
+                if grandchild not in seen:
+                    seen.add(grandchild)
+                    next_frontier.append(grandchild)
+        frontier = next_frontier
+        depth += 1
+    tree_cpu: int | None = None
+    if cpu is not None:
+        tree_cpu = cpu
+        for desc_pid in descendants:
+            desc_row = table.get(desc_pid)
+            desc_cpu = desc_row[2] if desc_row is not None else None
+            if desc_cpu is None:
+                # Prefer unknown over an undercounted tree total.
+                tree_cpu = None
+                break
+            tree_cpu += desc_cpu
+    return ProcessDiag(
+        pid=pid,
+        alive=True,
+        state=state,
+        cpu_utime=cpu,
+        cpu_stime=0 if cpu is not None else None,
+        rss_kb=rss_kb,
+        child_pids=children,
+        tree_cpu_utime=tree_cpu,
+        tree_cpu_stime=0 if tree_cpu is not None else None,
+    )
+
+
 def collect_proc_diag(pid: int) -> ProcessDiag | None:
-    """Collect process diagnostics from /proc. Returns None on non-Linux."""
+    """Collect process diagnostics from the platform backend.
+
+    Linux reads /proc; macOS uses one ``ps`` call (#689). Returns None on
+    other platforms or when the backend fails.
+    """
+    if sys.platform == "darwin":
+        return _collect_darwin_proc_diag(pid)
     if sys.platform != "linux":
         return None
 

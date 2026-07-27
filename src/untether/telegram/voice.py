@@ -41,7 +41,12 @@ _VOICE_MAX_RETRIES = 4
 
 class VoiceTranscriber(Protocol):
     async def transcribe(
-        self, *, model: str, audio_bytes: bytes, language: str | None = None
+        self,
+        *,
+        model: str,
+        audio_bytes: bytes,
+        language: str | None = None,
+        prompt: str | None = None,
     ) -> str: ...
 
 
@@ -56,16 +61,25 @@ class OpenAIVoiceTranscriber:
         self._api_key = api_key
 
     async def transcribe(
-        self, *, model: str, audio_bytes: bytes, language: str | None = None
+        self,
+        *,
+        model: str,
+        audio_bytes: bytes,
+        language: str | None = None,
+        prompt: str | None = None,
     ) -> str:
         audio_file = io.BytesIO(audio_bytes)
         audio_file.name = "voice.ogg"
         # #638: only include `language` when configured — omitting the kwarg
         # entirely preserves the API's auto-detect for unset configs (passing
         # None would serialise a null the endpoint may reject).
+        # #691: same for `prompt` (vocabulary bias) — some OpenAI-compatible
+        # endpoints 400 on unknown multipart fields rather than ignoring them.
         extra: dict[str, str] = {}
         if language is not None:
             extra["language"] = language
+        if prompt is not None:
+            extra["prompt"] = prompt
         async with AsyncOpenAI(
             base_url=self._base_url,
             api_key=self._api_key,
@@ -93,6 +107,7 @@ async def transcribe_voice(
     api_key: str | None = None,
     url_allowlist: Sequence[ipaddress.IPv4Network | ipaddress.IPv6Network] = (),
     language: str | None = None,
+    prompt: str | None = None,
 ) -> str | None:
     voice = msg.voice
     if voice is None:
@@ -148,12 +163,15 @@ async def transcribe_voice(
         transcriber = OpenAIVoiceTranscriber(base_url=base_url, api_key=api_key)
     try:
         text = await transcriber.transcribe(
-            model=model, audio_bytes=audio_bytes, language=language
+            model=model, audio_bytes=audio_bytes, language=language, prompt=prompt
         )
         logger.debug(
             "voice.transcribe.success",
             model=model,
             language=language,
+            # #691: never log the prompt text itself — operators may put
+            # project/client names in it.
+            prompt_configured=prompt is not None,
             audio_size=len(audio_bytes),
         )
         return text

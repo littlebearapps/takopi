@@ -1325,21 +1325,35 @@ async def _notify_drain_start(
     transport: object,
     running_tasks: Mapping[MessageRef, object],
 ) -> None:
-    """Send a draining notice to each unique chat with active runs."""
-    from ..transport import RenderedMessage
+    """Send a draining notice to each unique chat/topic with active runs.
+
+    #665: routed via ``SendOptions(thread_id=…)`` and de-duplicated by
+    ``(channel_id, thread_id)`` — a bare channel send lands in a forum
+    supergroup's General topic, invisible to the topic that owns the run.
+    """
+    from ..transport import RenderedMessage, SendOptions
 
     msg = RenderedMessage(
         text="\U0001f504 Restarting \N{EM DASH} waiting for your run to finish\N{HORIZONTAL ELLIPSIS}",
         extra={},
     )
-    notified: set[int | str] = set()
+    notified: set[tuple[int | str, object]] = set()
     for ref in list(running_tasks):
-        if ref.channel_id not in notified:
-            notified.add(ref.channel_id)
+        target = (ref.channel_id, ref.thread_id)
+        if target not in notified:
+            notified.add(target)
             try:
-                await transport.send(channel_id=ref.channel_id, message=msg)  # type: ignore[attr-defined]
+                await transport.send(  # type: ignore[attr-defined]
+                    channel_id=ref.channel_id,
+                    message=msg,
+                    options=SendOptions(thread_id=ref.thread_id),
+                )
             except Exception:  # noqa: BLE001
-                logger.debug("shutdown.drain_notify_failed", channel_id=ref.channel_id)
+                logger.debug(
+                    "shutdown.drain_notify_failed",
+                    channel_id=ref.channel_id,
+                    thread_id=ref.thread_id,
+                )
 
 
 async def _notify_drain_timeout(
@@ -1347,8 +1361,9 @@ async def _notify_drain_timeout(
     running_tasks: Mapping[MessageRef, object],
     remaining: int,
 ) -> None:
-    """Send a timeout notice to each unique chat still running after drain."""
-    from ..transport import RenderedMessage
+    """Send a timeout notice to each unique chat/topic still running after
+    drain. Same #665 thread routing + dedupe as ``_notify_drain_start``."""
+    from ..transport import RenderedMessage, SendOptions
 
     hint = (
         "Untether was restarted. Your session is saved"
@@ -1363,15 +1378,22 @@ async def _notify_drain_timeout(
         ),
         extra={},
     )
-    notified: set[int | str] = set()
+    notified: set[tuple[int | str, object]] = set()
     for ref in list(running_tasks):
-        if ref.channel_id not in notified:
-            notified.add(ref.channel_id)
+        target = (ref.channel_id, ref.thread_id)
+        if target not in notified:
+            notified.add(target)
             try:
-                await transport.send(channel_id=ref.channel_id, message=msg)  # type: ignore[attr-defined]
+                await transport.send(  # type: ignore[attr-defined]
+                    channel_id=ref.channel_id,
+                    message=msg,
+                    options=SendOptions(thread_id=ref.thread_id),
+                )
             except Exception:  # noqa: BLE001
                 logger.debug(
-                    "shutdown.timeout_notify_failed", channel_id=ref.channel_id
+                    "shutdown.timeout_notify_failed",
+                    channel_id=ref.channel_id,
+                    thread_id=ref.thread_id,
                 )
 
 
@@ -1439,6 +1461,7 @@ async def run_main_loop(
         is_shutting_down,
         request_shutdown,
         reset_shutdown,
+        scan_self_restart_evidence,
         select_drain_timeout,
     )
 
@@ -1694,30 +1717,56 @@ async def run_main_loop(
                 )
 
                 if active > 0:
-                    # #559: when the sole active run is (almost certainly) the
-                    # session that triggered the restart — the self-restart
-                    # deadlock from #547 — the full 120s drain is dead time the
-                    # lone run can never satisfy. Use a short drain instead so we
-                    # reach the clean-exit + outbox-flush path promptly.
+                    # #559/#690: the 10s fast drain needs demonstrated
+                    # causality — the sole run initiated this shutdown — not
+                    # mere cardinality. Evidence: the /restart origin chat
+                    # matches the sole run's chat, or the run's process tree
+                    # contains the blocking systemctl/launchctl invocation it
+                    # is deadlocked on (#547). An external restart (fleet
+                    # rollout, reboot — origin None, no matching descendant)
+                    # gets the full grace so a healthy in-flight run isn't
+                    # destroyed (#690).
                     origin_chat_id = get_shutdown_origin_chat_id()
-                    self_restart = active == 1
-                    drain_timeout = select_drain_timeout(active)
-                    if self_restart:
-                        sole_chat = next(
-                            (ref.channel_id for ref in state.running_tasks), None
+                    sole_ref = None
+                    sole_task = None
+                    if active == 1:
+                        sole_ref, sole_task = next(
+                            iter(state.running_tasks.items()), (None, None)
                         )
+                    sole_chat = sole_ref.channel_id if sole_ref is not None else None
+                    origin_matches = (
+                        active == 1
+                        and origin_chat_id is not None
+                        and origin_chat_id == sole_chat
+                    )
+                    evidence = "origin_match" if origin_matches else None
+                    if active == 1 and evidence is None:
+                        sole_pid = getattr(
+                            getattr(sole_task, "edits", None), "pid", None
+                        )
+                        evidence = scan_self_restart_evidence(sole_pid)
+                    self_restart = evidence is not None
+                    drain_timeout = select_drain_timeout(
+                        active, self_restart=self_restart
+                    )
+                    if active == 1:
                         logger.info(
-                            "shutdown.drain.self_restart",
+                            "shutdown.drain.self_restart"
+                            if self_restart
+                            else "shutdown.drain.external_sole_run",
                             drain_timeout_s=drain_timeout,
                             sole_chat_id=sole_chat,
                             origin_chat_id=origin_chat_id,
-                            origin_matches=origin_chat_id is not None
-                            and origin_chat_id == sole_chat,
+                            origin_matches=origin_matches,
+                            evidence=evidence,
                         )
 
-                    await _notify_drain_start(
-                        cfg.exec_cfg.transport, state.running_tasks
-                    )
+                    # Bounded so a hanging transport send can't eat the 30s
+                    # margin between DRAIN_TIMEOUT_S and TimeoutStopSec=150.
+                    with anyio.move_on_after(10.0):
+                        await _notify_drain_start(
+                            cfg.exec_cfg.transport, state.running_tasks
+                        )
 
                     # Wait for all runs to complete (up to drain timeout).
                     # Pending /at delays that have not yet fired are cancelled
@@ -1739,12 +1788,15 @@ async def run_main_loop(
                             "shutdown.drain_timeout",
                             remaining=remaining,
                             timeout_s=drain_timeout,
+                            self_restart=self_restart,
+                            evidence=evidence,
                         )
-                        await _notify_drain_timeout(
-                            cfg.exec_cfg.transport,
-                            state.running_tasks,
-                            remaining,
-                        )
+                        with anyio.move_on_after(10.0):
+                            await _notify_drain_timeout(
+                                cfg.exec_cfg.transport,
+                                state.running_tasks,
+                                remaining,
+                            )
 
                 logger.info("shutdown.exiting")
                 tg.cancel_scope.cancel()
@@ -2464,6 +2516,7 @@ async def run_main_loop(
                             cfg.voice_transcription_url_allowlist
                         ),
                         language=cfg.voice_transcription_language,
+                        prompt=cfg.voice_transcription_prompt,
                     )
                     if text is None:
                         return

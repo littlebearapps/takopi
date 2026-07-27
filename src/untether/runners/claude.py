@@ -699,6 +699,119 @@ class ClaudeStreamState:
 # guess can only delay a stall verdict, never mask one.
 DEFAULT_BARE_RATE_LIMIT_WAIT_S = 60.0
 
+# #692: subscription-cap reset deadlines harvested from result-error text
+# ("… resets 5:30pm (Australia/Melbourne)"), keyed by auth namespace
+# (CLAUDE_CONFIG_DIR proxy — caps are account-wide, so any run under the same
+# namespace shares the reset). Value: (monotonic deadline, display string).
+_RATE_LIMIT_RESET_LATCH: dict[str, tuple[float, str]] = {}
+
+# Case-insensitive; timezone REQUIRED — without an explicit zone the clock
+# time is unresolvable (containers commonly run UTC while the account does
+# not), so we fail closed to the #657 default rather than guess.
+_RESET_CLAUSE_RE = re.compile(
+    r"resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(([^)]+)\)",
+    re.IGNORECASE,
+)
+
+
+def _rate_limit_latch_key() -> str:
+    return os.environ.get("CLAUDE_CONFIG_DIR") or "default"
+
+
+def _parse_rate_limit_reset_clause(text: str | None) -> tuple[float, str] | None:
+    """#692: parse "resets 5:30pm (Australia/Melbourne)" into
+    (seconds_until_reset, display). Fail-closed: any parse miss, unknown
+    timezone, nonexistent (DST spring-forward) time, or a wait outside
+    (90s-expired, 24h] returns None and the caller keeps the 60s default.
+    """
+    if not text:
+        return None
+    m = _RESET_CLAUSE_RE.search(text)
+    if m is None:
+        return None
+    hour12 = int(m.group(1))
+    minute = int(m.group(2) or 0)
+    ampm = m.group(3).lower()
+    tz_name = m.group(4).strip()
+    if not 1 <= hour12 <= 12 or minute > 59:
+        return None
+    hour = (hour12 % 12) + (12 if ampm == "pm" else 0)
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    try:
+        tz = ZoneInfo(tz_name)
+    except (KeyError, ValueError, OSError):
+        return None
+    now = datetime.now(tz)
+    # fold=1 picks the LATER occurrence of a DST-ambiguous time — retrying
+    # early is the failure mode we're fixing.
+    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0, fold=1)
+    # A nonexistent spring-forward time doesn't survive a UTC round-trip.
+    round_trip = candidate.astimezone(UTC).astimezone(tz)
+    if (round_trip.hour, round_trip.minute) != (hour, minute):
+        return None
+    delta = (candidate - now).total_seconds()
+    if delta <= 0:
+        if delta > -90:
+            # "resets 5:30pm" parsed at 5:30:20pm — just expired; don't
+            # roll the deadline ~24h forward.
+            return None
+        candidate = candidate + timedelta(days=1)
+        delta = (candidate - now).total_seconds()
+    if delta > 24 * 3600:
+        return None
+    display = f"{hour12}:{minute:02d}{ampm} ({tz_name})"
+    return delta, display
+
+
+def _maybe_latch_rate_limit_reset(
+    result_text: str | None, *, state: ClaudeStreamState
+) -> None:
+    """#692: harvest the reset clause from a result error and latch it for
+    subsequent bare rate_limit_events (this run and the next ones in the
+    same process/auth namespace)."""
+    parsed = _parse_rate_limit_reset_clause(result_text)
+    if parsed is None:
+        return
+    wait_s, display = parsed
+    deadline = time.monotonic() + wait_s
+    _RATE_LIMIT_RESET_LATCH[_rate_limit_latch_key()] = (deadline, display)
+    # Keep the stall detector's "throttled upstream, not hung" context alive
+    # for the whole window, not just 60s past the last bare event.
+    state.rate_limit_wait_until = max(state.rate_limit_wait_until, deadline)
+    logger.info(
+        "claude.rate_limit_reset_latched",
+        wait_s=round(wait_s, 1),
+        resets_display=display,
+        source="result_error",
+    )
+
+
+def _latched_rate_limit_reset() -> tuple[float, str] | None:
+    """Remaining (seconds, display) from the harvested reset, or None when
+    absent/expired (expired entries are pruned)."""
+    key = _rate_limit_latch_key()
+    entry = _RATE_LIMIT_RESET_LATCH.get(key)
+    if entry is None:
+        return None
+    deadline, display = entry
+    remaining = deadline - time.monotonic()
+    if remaining <= 1.0:
+        _RATE_LIMIT_RESET_LATCH.pop(key, None)
+        return None
+    return remaining, display
+
+
+def _format_wait_approx(seconds: float) -> str:
+    """Round UP (rounding down implies an earlier retry): minutes under 2h,
+    then "Xh Ym"."""
+    minutes = max(1, (int(seconds) + 59) // 60)
+    if minutes < 120:
+        return f"~{minutes} min"
+    hours, rem = divmod(minutes, 60)
+    return f"~{hours}h {rem}m" if rem else f"~{hours}h"
+
 
 def _derive_retry_after_s(info: claude_schema.RateLimitInfo | None) -> float | None:
     """#518: when `rate_limit_event` omits `retry_after_ms`, fall back to the
@@ -1984,6 +2097,11 @@ def translate_claude_event(
 
             resume = ResumeToken(engine=ENGINE, value=event.session_id)
             error = None if ok else _extract_error(event, resumed=state.resumed)
+            if not ok:
+                # #692: the subscription-cap reset time lives only in the
+                # raw result-error text — harvest it for this run's stall
+                # context and for subsequent runs' bare rate_limit_events.
+                _maybe_latch_rate_limit_reset(event.result, state=state)
             usage = _usage_payload(event)
 
             # #572: record the stream-idle classification so the bridge's
@@ -2623,30 +2741,56 @@ def translate_claude_event(
             # rate_limit_events) still surface an actionable wait time and
             # accumulate into cumulative_s.
             retry_s_source = "retry_after_ms"
+            reset_display: str | None = None
             if retry_s is None:
                 derived = _derive_retry_after_s(info)
                 if derived is not None:
                     retry_s = derived
                     retry_s_source = "reset_ts"
                 else:
-                    # #657: no parseable timing at all — latch a conservative
-                    # default so awaiting_rate_limit_retry() is directionally
-                    # correct. Source stays distinct so audits can tell
-                    # derived waits from guessed ones.
-                    retry_s = DEFAULT_BARE_RATE_LIMIT_WAIT_S
-                    retry_s_source = "default"
-            state.rate_limit_total_s += retry_s
+                    # #692: a reset deadline harvested from an earlier
+                    # result error ("resets 5:30pm (…)") beats guessing —
+                    # subscription caps emit bare events every time, and a
+                    # ~60s estimate against a ~33min reality makes users
+                    # re-send into a closed window.
+                    latched = _latched_rate_limit_reset()
+                    if latched is not None:
+                        retry_s, reset_display = latched
+                        retry_s_source = "result_error"
+                    else:
+                        # #657: no timing anywhere — latch a conservative
+                        # default so awaiting_rate_limit_retry() is
+                        # directionally correct. Source stays distinct so
+                        # audits can tell derived waits from guessed ones.
+                        retry_s = DEFAULT_BARE_RATE_LIMIT_WAIT_S
+                        retry_s_source = "default"
+            now_mono = time.monotonic()
+            if retry_s_source == "result_error":
+                # #692: repeated bare events share ONE latched deadline —
+                # accumulate only the extension beyond the existing wait,
+                # not the full remaining window per event.
+                prev_deadline = max(state.rate_limit_wait_until, now_mono)
+                state.rate_limit_total_s += max(
+                    0.0, (now_mono + retry_s) - prev_deadline
+                )
+            else:
+                state.rate_limit_total_s += retry_s
             # #495/#499/#500: latch a deadline so the stall detector can
             # tell "throttled upstream, will resume by itself" apart from
             # "hung". Without this only a cumulative total existed, which
             # says nothing about whether we are waiting *right now*.
-            state.rate_limit_wait_until = time.monotonic() + retry_s
+            state.rate_limit_wait_until = now_mono + retry_s
             state.rate_limit_count += 1
             state.note_seq += 1
             action_id = f"rate_limit_{state.note_seq}"
             # Round to nearest second for display but show fractional when < 1s
             display_s = int(retry_s) if retry_s >= 1 else f"{retry_s:.1f}"
-            if retry_s_source == "default":
+            if retry_s_source == "result_error":
+                title = (
+                    f"⏳ Rate limited until {reset_display} "
+                    f"({_format_wait_approx(retry_s)})"
+                )
+            elif retry_s_source == "default":
                 # A guessed window is shown as an estimate, not as fact
                 title = f"⏳ Rate limited — waiting to retry (~{display_s}s)"
             else:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import os
 import signal as _signal
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -742,6 +743,42 @@ def _format_run_cost(usage: dict[str, Any] | None) -> str | None:
     return " · ".join(parts) or None
 
 
+# #658: one-shot per process — see _warn_cost_visibility_gap.
+_cost_visibility_gap_warned = False
+_cost_visibility_gap_lock = threading.Lock()
+
+
+def _warn_cost_visibility_gap(cost: float, settings: Any, budget_enabled: bool) -> None:
+    """#658: emit ONE ``config.cost_visibility_gap`` WARNING per process when
+    real API spend is neither displayed (``[footer] show_api_cost=false``)
+    nor bounded (no effective ``[cost_budget]``) — without it the operator
+    has no in-product moment to learn the burn rate. Pure config-shape
+    inspection; no billing inference. The fleet's issue watcher ingests
+    WARNING-level events, so log-only still reaches the operator.
+    """
+    global _cost_visibility_gap_warned
+    budget_cfg = settings.cost_budget
+    no_effective_budget = not budget_enabled or (
+        budget_cfg.max_cost_per_run is None and budget_cfg.max_cost_per_day is None
+    )
+    footer = settings.footer
+    if not no_effective_budget or footer.show_api_cost:
+        return
+    with _cost_visibility_gap_lock:
+        if _cost_visibility_gap_warned:
+            return
+        _cost_visibility_gap_warned = True
+    logger.warning(
+        "config.cost_visibility_gap",
+        total_cost_usd=cost,
+        cost_budget_enabled=budget_enabled,
+        has_per_run_budget=budget_cfg.max_cost_per_run is not None,
+        has_per_day_budget=budget_cfg.max_cost_per_day is not None,
+        show_api_cost=footer.show_api_cost,
+        show_subscription_usage=footer.show_subscription_usage,
+    )
+
+
 def _check_cost_budget(
     usage: dict[str, Any] | None,
 ) -> tuple[str | None, object | None]:
@@ -783,6 +820,7 @@ def _check_cost_budget(
             budget_enabled = run_options.budget_enabled
         else:
             budget_enabled = budget_cfg.enabled
+        _warn_cost_visibility_gap(cost, settings, budget_enabled)
         if not budget_enabled:
             return None, None
 
@@ -948,6 +986,10 @@ class RunningTask:
     cancel_requested: anyio.Event = field(default_factory=anyio.Event)
     done: anyio.Event = field(default_factory=anyio.Event)
     context: RunContext | None = None
+    # #690: live ProgressEdits for this run — exposes the engine subprocess
+    # PID (edits.pid) so the drain's self-restart evidence scan can walk the
+    # run's process tree.
+    edits: ProgressEdits | None = None
 
 
 RunningTasks = dict[MessageRef, RunningTask]
@@ -4029,7 +4071,7 @@ async def handle_message(
 
     running_task: RunningTask | None = None
     if running_tasks is not None and progress_ref is not None:
-        running_task = RunningTask(context=context)
+        running_task = RunningTask(context=context, edits=edits)
         running_tasks[progress_ref] = running_task
 
     cancel_exc_type = anyio.get_cancelled_exc_class()

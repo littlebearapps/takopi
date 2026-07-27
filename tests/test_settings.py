@@ -300,6 +300,52 @@ def test_voice_transcription_language_default_none(tmp_path: Path) -> None:
     assert settings.transports.telegram.voice_transcription_language is None
 
 
+def test_voice_transcription_prompt_stripped(tmp_path: Path) -> None:
+    """#691: vocabulary-bias prompt is stripped at parse time."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "tok"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n"
+        'voice_transcription_prompt = " Trello, Untether, Claude Code "\n',
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert (
+        settings.transports.telegram.voice_transcription_prompt
+        == "Trello, Untether, Claude Code"
+    )
+
+
+def test_voice_transcription_prompt_default_none(tmp_path: Path) -> None:
+    """#691: omitted → None → the API parameter is omitted entirely."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n'
+        "allow_any_user = true\n",
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert settings.transports.telegram.voice_transcription_prompt is None
+
+
+def test_voice_transcription_prompt_rejects_over_1000_chars(tmp_path: Path) -> None:
+    """#691: reject rather than silently truncate — invisible truncation
+    would change the configured bias without telling the operator."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "tok"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n"
+        f'voice_transcription_prompt = "{"x" * 1001}"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="voice_transcription_prompt"):
+        load_settings(config_path)
+
+
 def test_voice_transcription_language_rejects_non_iso_code(tmp_path: Path) -> None:
     """#638: a typo like 'english' fails at boot, not silently at the API."""
     config_path = tmp_path / "untether.toml"

@@ -124,3 +124,94 @@ class TestConcurrentRecord:
             f"lost cost updates under concurrency: "
             f"expected ${expected:.2f}, got ${observed:.2f}"
         )
+
+
+# ---------------------------------------------------------------------------
+# #658: config.cost_visibility_gap one-shot warning (runner_bridge)
+# ---------------------------------------------------------------------------
+
+
+def _gap_settings(
+    *,
+    enabled: bool = False,
+    per_run: float | None = None,
+    per_day: float | None = None,
+    show_api_cost: bool = False,
+    show_subscription_usage: bool = True,
+):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        cost_budget=SimpleNamespace(
+            enabled=enabled,
+            max_cost_per_run=per_run,
+            max_cost_per_day=per_day,
+        ),
+        footer=SimpleNamespace(
+            show_api_cost=show_api_cost,
+            show_subscription_usage=show_subscription_usage,
+        ),
+    )
+
+
+def _capture_gap_warnings(monkeypatch):
+    from untether import runner_bridge
+
+    warnings: list[tuple[str, dict]] = []
+
+    class _Logger:
+        def warning(self, event, **kw):
+            warnings.append((event, kw))
+
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    monkeypatch.setattr(runner_bridge, "logger", _Logger())
+    monkeypatch.setattr(runner_bridge, "_cost_visibility_gap_warned", False)
+    return warnings
+
+
+def test_cost_visibility_gap_fires_once(monkeypatch) -> None:
+    from untether.runner_bridge import _warn_cost_visibility_gap
+
+    warnings = _capture_gap_warnings(monkeypatch)
+    settings = _gap_settings()
+    _warn_cost_visibility_gap(7.5, settings, False)
+    _warn_cost_visibility_gap(3.0, settings, False)
+
+    events = [w for w in warnings if w[0] == "config.cost_visibility_gap"]
+    assert len(events) == 1
+    fields = events[0][1]
+    assert fields["total_cost_usd"] == 7.5
+    assert fields["show_api_cost"] is False
+    assert fields["show_subscription_usage"] is True
+    assert fields["cost_budget_enabled"] is False
+
+
+def test_cost_visibility_gap_silent_when_cost_displayed(monkeypatch) -> None:
+    from untether.runner_bridge import _warn_cost_visibility_gap
+
+    warnings = _capture_gap_warnings(monkeypatch)
+    _warn_cost_visibility_gap(7.5, _gap_settings(show_api_cost=True), False)
+    assert warnings == []
+
+
+def test_cost_visibility_gap_silent_with_effective_budget(monkeypatch) -> None:
+    from untether.runner_bridge import _warn_cost_visibility_gap
+
+    warnings = _capture_gap_warnings(monkeypatch)
+    _warn_cost_visibility_gap(7.5, _gap_settings(enabled=True, per_run=20.0), True)
+    assert warnings == []
+
+
+def test_cost_visibility_gap_fires_when_enabled_but_capless(monkeypatch) -> None:
+    """[cost_budget] enabled=true with both caps None provides no protection
+    — the gap warning must still fire."""
+    from untether.runner_bridge import _warn_cost_visibility_gap
+
+    warnings = _capture_gap_warnings(monkeypatch)
+    _warn_cost_visibility_gap(7.5, _gap_settings(enabled=True), True)
+    events = [w for w in warnings if w[0] == "config.cost_visibility_gap"]
+    assert len(events) == 1
+    assert events[0][1]["has_per_run_budget"] is False
+    assert events[0][1]["has_per_day_budget"] is False
