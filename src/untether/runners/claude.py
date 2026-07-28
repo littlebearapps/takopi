@@ -2730,6 +2730,12 @@ def translate_claude_event(
 
             # A1: AskUserQuestion — extract questions and render option buttons
             ask_question: str | None = None
+            # #709: True only when an AskQuestionState flow was created, i.e.
+            # when the `aq` callback handler (not Approve/Deny) drives this
+            # action. That's the discriminator the bridge binds the tracked
+            # action on — `ask_question` alone is absent when extraction
+            # produced an empty question string.
+            ask_flow_created = False
             if isinstance(request, claude_schema.ControlCanUseToolRequest):
                 tool_name = getattr(request, "tool_name", "")
                 if tool_name == "AskUserQuestion":
@@ -2770,6 +2776,7 @@ def translate_claude_event(
                                 questions=questions_list,
                             )
                             _ASK_QUESTION_FLOWS[request_id] = flow
+                            ask_flow_created = True
                             # Replace Approve/Deny with option buttons
                             button_rows.clear()
                             for i, opt in enumerate(options[:4]):
@@ -2824,6 +2831,8 @@ def translate_claude_event(
             }
             if ask_question:
                 detail["ask_question"] = ask_question
+            if ask_flow_created:
+                detail["ask_flow"] = True
 
             return [
                 *reconciled_events,

@@ -112,6 +112,63 @@ def register_ephemeral_message(
     _EPHEMERAL_MSGS_TS[key] = _time.monotonic()
 
 
+# ---------------------------------------------------------------------------
+# #709: AskUserQuestion tracked-action registry
+# ---------------------------------------------------------------------------
+# Two writers own the progress message and only one of them had state. The
+# ``aq`` callback handler advances a multi-question flow by editing the
+# message directly, but the ProgressTracker still held the AskUserQuestion
+# control action with its INTERCEPT-time title and keyboard — so the next
+# heartbeat re-render regenerated the message from that unchanged model and
+# clobbered the edit, showing Q1's text and Q1's option labels while Q2 was
+# outstanding. This registry lets the handler advance the model too.
+#
+# Keyed by request_id (which the flow already carries). Same TTL sweep as the
+# other run-scoped registries above.
+
+_ASK_ACTION_MODEL: dict[str, tuple[ProgressTracker, str]] = {}
+_ASK_ACTION_MODEL_TS: dict[str, float] = {}
+
+
+def register_ask_action_model(
+    request_id: str, tracker: ProgressTracker, action_id: str
+) -> None:
+    """Record which tracked action renders *request_id*'s question."""
+    import time as _time
+
+    _ASK_ACTION_MODEL[request_id] = (tracker, action_id)
+    _ASK_ACTION_MODEL_TS[request_id] = _time.monotonic()
+
+
+def advance_ask_action_model(
+    request_id: str,
+    *,
+    title: str,
+    buttons: list[list[dict[str, str]]] | None,
+) -> bool:
+    """Point the tracked action at the flow's CURRENT question.
+
+    ``buttons=None`` clears the keyboard from the model — used when the flow
+    is answered, so the renderer's newest-first keyboard scan (#683) stops
+    finding this action instead of the handler racing an edit against it.
+    """
+    entry = _ASK_ACTION_MODEL.get(request_id)
+    if entry is None:
+        return False
+    tracker, action_id = entry
+    detail = dict(tracker.action_detail(action_id) or {})
+    if buttons is None:
+        detail.pop("inline_keyboard", None)
+    else:
+        detail["inline_keyboard"] = {"buttons": buttons}
+    return tracker.update_action(action_id, title=title, detail=detail)
+
+
+def clear_ask_action_model(request_id: str) -> None:
+    _ASK_ACTION_MODEL.pop(request_id, None)
+    _ASK_ACTION_MODEL_TS.pop(request_id, None)
+
+
 # Outline message cleanup registry.
 # Maps session_id → (transport, list of outline refs).
 # Populated by ProgressEdits._send_outline(), consumed by
@@ -176,6 +233,11 @@ def sweep_stale_registries(now: float | None = None) -> int:
         if now - ts > _REGISTRY_TTL_SECONDS:
             _OUTLINE_REGISTRY.pop(sid, None)
             _OUTLINE_REGISTRY_TS.pop(sid, None)
+            pruned += 1
+    for rid, ts in list(_ASK_ACTION_MODEL_TS.items()):
+        if now - ts > _REGISTRY_TTL_SECONDS:
+            _ASK_ACTION_MODEL.pop(rid, None)
+            _ASK_ACTION_MODEL_TS.pop(rid, None)
             pruned += 1
     if pruned:
         logger.info("runner_bridge.registries_swept", pruned=pruned)
@@ -2948,6 +3010,14 @@ class ProgressEdits:
     async def on_event(self, evt: UntetherEvent) -> None:
         if not self.tracker.note_event(evt):
             return
+        # #709: an AskUserQuestion control action is advanced by the `aq`
+        # callback handler, not by further engine events — bind it to this
+        # tracker so the handler can move the MODEL and the heartbeat
+        # re-render agrees with what the user was just shown.
+        if isinstance(evt, ActionEvent) and evt.action.detail.get("ask_flow"):
+            _ask_rid = evt.action.detail.get("request_id")
+            if isinstance(_ask_rid, str) and _ask_rid:
+                register_ask_action_model(_ask_rid, self.tracker, str(evt.action.id))
         if self.progress_ref is None:
             return
         now = self.clock()

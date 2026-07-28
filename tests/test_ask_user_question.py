@@ -1123,3 +1123,253 @@ def test_698_answered_memo_expires_and_is_bounded(monkeypatch) -> None:
     # Oldest evicted first, newest retained.
     assert "req-0" not in _ANSWERED_ASK_FLOWS
     assert f"req-{claude_mod._ANSWERED_ASK_FLOWS_MAX + 9}" in _ANSWERED_ASK_FLOWS
+
+
+# ---------------------------------------------------------------------------
+# #709 — the heartbeat re-render must not clobber the in-place question edit
+# ---------------------------------------------------------------------------
+
+
+def _tracked_ask_action(request_id: str, *, title: str, buttons):
+    """Build a ProgressTracker holding one AskUserQuestion control action and
+    bind it the way ProgressEdits.on_event does."""
+    from untether.model import Action, ActionEvent
+    from untether.progress import ProgressTracker
+    from untether.runner_bridge import register_ask_action_model
+
+    tracker = ProgressTracker(engine="claude")
+    action = Action(
+        id="claude.control.1",
+        kind="warning",
+        title=title,
+        detail={
+            "request_id": request_id,
+            "request_type": "can_use_tool",
+            "ask_flow": True,
+            "inline_keyboard": {"buttons": buttons},
+        },
+    )
+    tracker.note_event(
+        ActionEvent(engine="claude", action=action, phase="started", ok=None)
+    )
+    register_ask_action_model(request_id, tracker, "claude.control.1")
+    return tracker
+
+
+def _rendered_keyboard(tracker):
+    """The buttons the progress renderer's newest-first scan would emit."""
+    for action_state in reversed(tracker.snapshot().actions):
+        if action_state.completed:
+            continue
+        kb = action_state.action.detail.get("inline_keyboard")
+        if kb and isinstance(kb, dict) and "buttons" in kb:
+            return [row[0]["text"] for row in kb["buttons"]]
+    return None
+
+
+@pytest.mark.anyio
+async def test_709_answering_q1_advances_the_tracked_action(monkeypatch) -> None:
+    """#709: answering Q1 edits the message to Q2 — the tracked action must
+    move with it, or the next 30s heartbeat re-renders Q1's title and Q1's
+    option labels over the top while Q2 is outstanding."""
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow = AskQuestionState(
+        request_id="req-709-a",
+        channel_id=CHAT_A,
+        questions=[
+            {
+                "question": "QA colour?",
+                "options": [{"label": "Red"}, {"label": "Blue"}],
+            },
+            {
+                "question": "QA size?",
+                "options": [{"label": "Small"}, {"label": "Large"}],
+            },
+        ],
+    )
+    _ASK_QUESTION_FLOWS[flow.request_id] = flow
+    tracker = _tracked_ask_action(
+        flow.request_id,
+        title="❓ Question 1 of 2: QA colour?",
+        buttons=[
+            [{"text": "Red", "callback_data": "aq:opt:0"}],
+            [{"text": "Blue", "callback_data": "aq:opt:1"}],
+            [{"text": "Other (type reply)", "callback_data": "aq:other"}],
+        ],
+    )
+    # Pre-condition: the model is showing Q1.
+    assert _rendered_keyboard(tracker) == ["Red", "Blue", "Other (type reply)"]
+
+    await cmd_mod.AskQuestionCommand().handle(_make_command_ctx("opt:0"))
+
+    # Post-condition: the model is showing Q2 — so a heartbeat re-render is a
+    # no-op instead of the regression this issue reported.
+    action = tracker.snapshot().actions[0].action
+    assert action.title == "❓ Question 2 of 2: QA size?"
+    assert _rendered_keyboard(tracker) == ["Small", "Large", "Other (type reply)"]
+
+
+@pytest.mark.anyio
+async def test_709_final_answer_drops_the_keyboard_from_the_model(
+    monkeypatch,
+) -> None:
+    """The #550 keyboard strip becomes a model change, so a heartbeat landing
+    mid-teardown cannot repaint the answered question's buttons."""
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow = AskQuestionState(
+        request_id="req-709-b",
+        channel_id=CHAT_A,
+        questions=[{"question": "Only?", "options": [{"label": "A"}]}],
+    )
+    _ASK_QUESTION_FLOWS[flow.request_id] = flow
+    tracker = _tracked_ask_action(
+        flow.request_id,
+        title="❓ Only?",
+        buttons=[[{"text": "A", "callback_data": "aq:opt:0"}]],
+    )
+
+    async def _fake_answer(rid: str) -> bool:
+        _ASK_QUESTION_FLOWS.pop(rid, None)
+        return True
+
+    monkeypatch.setattr(
+        "untether.runners.claude.answer_ask_question_with_options", _fake_answer
+    )
+
+    await cmd_mod.AskQuestionCommand().handle(_make_command_ctx("opt:0"))
+
+    assert _rendered_keyboard(tracker) is None
+    assert tracker.snapshot().actions[0].action.title == "✅ All questions answered"
+
+
+@pytest.mark.anyio
+async def test_709_untracked_flow_still_edits(monkeypatch) -> None:
+    """No registry entry (e.g. a non-Claude presenter path) must degrade to the
+    plain edit, never raise."""
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow = AskQuestionState(
+        request_id="req-709-c",
+        channel_id=CHAT_A,
+        questions=[
+            {"question": "Q1", "options": [{"label": "A"}]},
+            {"question": "Q2", "options": [{"label": "B"}]},
+        ],
+    )
+    _ASK_QUESTION_FLOWS[flow.request_id] = flow
+
+    ctx = _make_command_ctx("opt:0")
+    assert await cmd_mod.AskQuestionCommand().handle(ctx) is None
+    assert ctx.executor.edit.await_count == 1
+
+
+def test_709_claude_marks_ask_actions_with_ask_flow() -> None:
+    """The bridge binds on ``detail["ask_flow"]`` — set only when an
+    AskQuestionState was created, i.e. when the `aq` handler drives the
+    action. ``ask_question`` alone is absent when extraction yields "".
+    """
+    state, factory = _make_state_with_session()
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-709-d",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "AskUserQuestion",
+                "input": {
+                    "questions": [{"question": "Pick?", "options": [{"label": "A"}]}]
+                },
+            },
+        }
+    )
+    events = translate_claude_event(event, title="claude", state=state, factory=factory)
+    detail = events[-1].action.detail
+    assert detail["ask_flow"] is True
+    assert detail["request_id"] == "req-709-d"
+
+
+# ---------------------------------------------------------------------------
+# #710 — concurrent taps on the final option must not IndexError
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_710_concurrent_final_taps_do_not_raise(monkeypatch) -> None:
+    """#710: callback A increments the index then suspends on the answer
+    await; callback B lands inside that window and read
+    ``flow.questions[flow.current_index]`` unguarded → IndexError, surfacing
+    as an ERROR traceback (`callback.failed`, a watcher-tracked signature)
+    plus a failure toast for an action that in fact succeeded."""
+    import anyio
+
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow = AskQuestionState(
+        request_id="req-710-a",
+        channel_id=CHAT_A,
+        questions=[{"question": "Only?", "options": [{"label": "A"}, {"label": "B"}]}],
+    )
+    _ASK_QUESTION_FLOWS[flow.request_id] = flow
+
+    gate = anyio.Event()
+
+    async def _slow_answer(rid: str) -> bool:
+        # Hold the flow alive inside the await, exactly as the real control
+        # response does while it round-trips to the subprocess.
+        await gate.wait()
+        _ASK_QUESTION_FLOWS.pop(rid, None)
+        return True
+
+    monkeypatch.setattr(
+        "untether.runners.claude.answer_ask_question_with_options", _slow_answer
+    )
+
+    results: list[object] = []
+
+    async def _tap(args_text: str) -> None:
+        results.append(
+            await cmd_mod.AskQuestionCommand().handle(_make_command_ctx(args_text))
+        )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_tap, "aq:opt:0".split(":", 1)[1])
+        await anyio.sleep(0)  # let A reach the await
+        tg.start_soon(_tap, "opt:1")
+        await anyio.sleep(0)
+        gate.set()
+
+    texts = [getattr(r, "text", None) for r in results]
+    assert "Already answered" in texts
+    assert any(t and "Answers sent" in t for t in texts)
+
+
+@pytest.mark.anyio
+async def test_710_out_of_range_index_reports_already_answered() -> None:
+    """The bounds check reuses #698's vocabulary, so both orderings of a
+    double-tap produce the same truthful outcome."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow = AskQuestionState(
+        request_id="req-710-b",
+        channel_id=CHAT_A,
+        questions=[{"question": "Only?", "options": [{"label": "A"}]}],
+        current_index=1,  # already past the end
+        answers={"Only?": "A"},
+    )
+    _ASK_QUESTION_FLOWS[flow.request_id] = flow
+
+    with capture_logs() as logs:
+        result = await cmd_mod.AskQuestionCommand().handle(_make_command_ctx("opt:0"))
+
+    assert result is not None
+    assert result.text == "Already answered"
+    already = [
+        r for r in logs if r.get("event") == "ask_question.flow_already_answered"
+    ]
+    assert len(already) == 1
+    assert already[0]["log_level"] == "info"
+    assert already[0]["request_id"] == "req-710-b"
