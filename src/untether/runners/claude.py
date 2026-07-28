@@ -3731,19 +3731,48 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         # Pre-result: tick log still useful so we can
                         # confirm the watchdog is alive even before the
                         # first ``result`` event lands.
+                        #
+                        # #696: these two counts used to be hardcoded ``0``
+                        # here while the post-result branch below computed
+                        # them for real — same event name, same field names,
+                        # one branch measured and one stubbed. A session
+                        # sitting on a visibly-pending approval keyboard
+                        # therefore logged ``pending_asks=0`` every 30 s,
+                        # which reads as a presenter/runner desync and cost
+                        # a source read to clear. Measuring them here also
+                        # yields the signal that was missing entirely: a
+                        # pre-result tick with ``pending_asks=1`` is a
+                        # positive, greppable "this run is waiting on the
+                        # user" marker, so an operator can answer "is
+                        # anything waiting on me?" from logs alone.
+                        pre_sid = (
+                            state.factory.resume.value
+                            if state.factory.resume is not None
+                            else None
+                        )
+                        pre_pending_requests = (
+                            [k for k, v in _REQUEST_TO_SESSION.items() if v == pre_sid]
+                            if pre_sid
+                            else []
+                        )
+                        pre_pending_asks = (
+                            [
+                                k
+                                for k in _PENDING_ASK_REQUESTS
+                                if _REQUEST_TO_SESSION.get(k) == pre_sid
+                            ]
+                            if pre_sid
+                            else []
+                        )
                         run_logger.info(
                             "claude.post_result_idle.tick",
-                            session_id=(
-                                state.factory.resume.value
-                                if state.factory.resume is not None
-                                else None
-                            ),
+                            session_id=pre_sid,
                             armed=False,
                             elapsed_s=None,
                             effective_timeout_s=None,
                             dead_wakeup=False,
-                            pending_requests=0,
-                            pending_asks=0,
+                            pending_requests=len(pre_pending_requests),
+                            pending_asks=len(pre_pending_asks),
                             would_close=False,
                             last_bg_bash_launched_at_age_s=None,
                             last_schedule_wakeup_arm_delay=(
@@ -4018,291 +4047,349 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         prev_diag = None
         ceiling_extended_logged = False
         last_tick_log_at = reader_done_at
-        while True:
-            await anyio.sleep(self._subcountdown_poll_interval_s)
-            if proc.returncode is not None:
-                if stream is not None:
-                    self._transition_lifecycle(
-                        stream,
-                        "exited",
-                        run_logger,
+        # #699: the liveness verdict below is recomputed every
+        # ``_subcountdown_poll_interval_s`` (5 s) but was only ever surfaced by
+        # the ~30 s throttled ``subcountdown_tick`` or the one-shot
+        # ``limbo_detected``. A healthy fast reap clears the loop before either
+        # fires, so a short subcountdown evaluated ``cpu_active`` several times
+        # and discarded every one — six passes of production traffic on nsd
+        # produced zero samples, which blocked #689's Linux-collateral
+        # verification. These carry the last computed verdict out to the
+        # terminal ``subcountdown_exit`` line in the ``finally`` below.
+        cpu_active: bool | None = None
+        tree_active: bool | None = None
+        live_bg = False
+        limbo_grace_applied = False
+        poll_count = 0
+        # Overwritten immediately before each ``return``; the initial value is
+        # the one that survives when the enclosing scope is cancelled.
+        exit_reason_log = "cancelled"
+        try:
+            while True:
+                await anyio.sleep(self._subcountdown_poll_interval_s)
+                poll_count += 1
+                if proc.returncode is not None:
+                    if stream is not None:
+                        self._transition_lifecycle(
+                            stream,
+                            "exited",
+                            run_logger,
+                            pid=proc.pid,
+                            session_id=session_id,
+                            rc=proc.returncode,
+                        )
+                    exit_reason_log = "subprocess_exited"
+                    return "subprocess_exited_during_subcountdown"
+
+                sid = (
+                    state.factory.resume.value
+                    if state.factory.resume is not None
+                    else None
+                )
+                pending_requests = (
+                    [k for k, v in _REQUEST_TO_SESSION.items() if v == sid]
+                    if sid
+                    else []
+                )
+                pending_asks = (
+                    [
+                        k
+                        for k in _PENDING_ASK_REQUESTS
+                        if _REQUEST_TO_SESSION.get(k) == sid
+                    ]
+                    if sid
+                    else []
+                )
+                if pending_requests or pending_asks:
+                    # User is mid-interaction — re-arm the deadline so the
+                    # subcountdown doesn't fire while a control_response is
+                    # in flight. Match _post_result_idle_watchdog's deferred
+                    # re-arm semantics (line 2843).
+                    run_logger.info(
+                        "claude.post_result_idle.subcountdown_deferred",
+                        session_id=sid,
                         pid=proc.pid,
-                        session_id=session_id,
-                        rc=proc.returncode,
+                        pending_requests=len(pending_requests),
+                        pending_asks=len(pending_asks),
                     )
-                return "subprocess_exited_during_subcountdown"
+                    deadline = time.monotonic() + timeout_s
+                    if grace_deadline is not None:
+                        grace_deadline = time.monotonic() + grace
+                    continue
 
-            sid = (
-                state.factory.resume.value if state.factory.resume is not None else None
-            )
-            pending_requests = (
-                [k for k, v in _REQUEST_TO_SESSION.items() if v == sid] if sid else []
-            )
-            pending_asks = (
-                [k for k in _PENDING_ASK_REQUESTS if _REQUEST_TO_SESSION.get(k) == sid]
-                if sid
-                else []
-            )
-            if pending_requests or pending_asks:
-                # User is mid-interaction — re-arm the deadline so the
-                # subcountdown doesn't fire while a control_response is
-                # in flight. Match _post_result_idle_watchdog's deferred
-                # re-arm semantics (line 2843).
-                run_logger.info(
-                    "claude.post_result_idle.subcountdown_deferred",
-                    session_id=sid,
-                    pid=proc.pid,
-                    pending_requests=len(pending_requests),
-                    pending_asks=len(pending_asks),
+                elapsed = time.monotonic() - reader_done_at
+                # #650: per-poll liveness snapshot — feeds the limbo warning, the
+                # ~30 s ``subcountdown_tick`` observability line, and the
+                # #647/#646 liveness-aware ceiling below.
+                diag = collect_proc_diag(proc.pid)
+                cpu_active = (
+                    is_cpu_active(prev_diag, diag) if prev_diag and diag else None
                 )
-                deadline = time.monotonic() + timeout_s
-                if grace_deadline is not None:
-                    grace_deadline = time.monotonic() + grace
-                continue
+                tree_active = (
+                    is_tree_cpu_active(prev_diag, diag) if prev_diag and diag else None
+                )
+                prev_diag = diag
+                live_bg = has_live_background_work(state)
 
-            elapsed = time.monotonic() - reader_done_at
-            # #650: per-poll liveness snapshot — feeds the limbo warning, the
-            # ~30 s ``subcountdown_tick`` observability line, and the
-            # #647/#646 liveness-aware ceiling below.
-            diag = collect_proc_diag(proc.pid)
-            cpu_active = is_cpu_active(prev_diag, diag) if prev_diag and diag else None
-            tree_active = (
-                is_tree_cpu_active(prev_diag, diag) if prev_diag and diag else None
-            )
-            prev_diag = diag
-            live_bg = has_live_background_work(state)
-
-            # Tier 3: limbo detection — a one-shot warning surfacing the
-            # condition for triage. ``untether-issue-watcher`` files this
-            # automatically on the next sweep.
-            if (
-                not limbo_logged
-                and elapsed >= self._subcountdown_limbo_detect_threshold_s
-            ):
-                limbo_logged = True
-                # #590: refresh the orphan snapshot — children spawned AFTER
-                # the reader-done snapshot (the sl "late leaker" shape) are
-                # captured here so the post-exit sweep can reach them. Use the
-                # recursive walk (find_descendants) rather than diag.child_pids,
-                # which is DIRECT children only and misses the npx→node
-                # grandchild that actually leaks.
-                _capture_orphan_descendants(state, source="limbo", pid=proc.pid)
-                # #653: the level reflects the assessed state, not the
-                # transition into it. Live background work — or a
-                # demonstrably busy process tree — lingering after the
-                # result is healthy, expected behaviour under the
-                # liveness-aware ceiling (#646/#647): INFO. WARNING is
-                # reserved for limbo with no evidence of work, the
-                # genuinely-stuck case the warning was written for.
-                limbo_log = (
-                    run_logger.info
-                    if (live_bg or cpu_active is True or tree_active is True)
-                    else run_logger.warning
-                )
-                limbo_log(
-                    "runner.limbo_detected",
-                    engine="claude",
-                    pid=proc.pid,
-                    session_id=sid,
-                    seconds_since_reader_done=round(elapsed, 1),
-                    seconds_since_last_result=(
-                        round(time.monotonic() - state.result_received_at, 1)
-                        if state.result_received_at is not None
-                        else None
-                    ),
-                    live_background_work=live_bg,
-                    cpu_active=cpu_active,
-                    tree_active=tree_active,
-                    mcp_child_pids=list(diag.child_pids) if diag else [],
-                    rss_kb=diag.rss_kb if diag else None,
-                    tcp_total=diag.tcp_total if diag else None,
-                )
-                if stream is not None:
-                    self._transition_lifecycle(
-                        stream,
-                        "limbo",
-                        run_logger,
+                # Tier 3: limbo detection — a one-shot warning surfacing the
+                # condition for triage. ``untether-issue-watcher`` files this
+                # automatically on the next sweep.
+                if (
+                    not limbo_logged
+                    and elapsed >= self._subcountdown_limbo_detect_threshold_s
+                ):
+                    limbo_logged = True
+                    # #590: refresh the orphan snapshot — children spawned AFTER
+                    # the reader-done snapshot (the sl "late leaker" shape) are
+                    # captured here so the post-exit sweep can reach them. Use the
+                    # recursive walk (find_descendants) rather than diag.child_pids,
+                    # which is DIRECT children only and misses the npx→node
+                    # grandchild that actually leaks.
+                    _capture_orphan_descendants(state, source="limbo", pid=proc.pid)
+                    # #653: the level reflects the assessed state, not the
+                    # transition into it. Live background work — or a
+                    # demonstrably busy process tree — lingering after the
+                    # result is healthy, expected behaviour under the
+                    # liveness-aware ceiling (#646/#647): INFO. WARNING is
+                    # reserved for limbo with no evidence of work, the
+                    # genuinely-stuck case the warning was written for.
+                    limbo_log = (
+                        run_logger.info
+                        if (live_bg or cpu_active is True or tree_active is True)
+                        else run_logger.warning
+                    )
+                    limbo_log(
+                        "runner.limbo_detected",
+                        engine="claude",
                         pid=proc.pid,
                         session_id=sid,
                         seconds_since_reader_done=round(elapsed, 1),
+                        seconds_since_last_result=(
+                            round(time.monotonic() - state.result_received_at, 1)
+                            if state.result_received_at is not None
+                            else None
+                        ),
+                        live_background_work=live_bg,
+                        cpu_active=cpu_active,
+                        tree_active=tree_active,
+                        mcp_child_pids=list(diag.child_pids) if diag else [],
+                        rss_kb=diag.rss_kb if diag else None,
+                        tcp_total=diag.tcp_total if diag else None,
                     )
-
-            # #591: cap the deadline at the limbo grace when the session is
-            # fully quiescent — no live background work means nothing can
-            # legitimately produce output any more (pending requests/asks
-            # were handled above via the re-arm branch).
-            #
-            # #655: `not live_bg` alone is NOT quiescence — it only means no
-            # *registered* background handle. A process can be busy with
-            # direct work (waiting on a build, a slow MCP call, a poll loop)
-            # with live_bg False. Consult the same liveness signals the
-            # extension gate below uses, so a demonstrably-busy process falls
-            # through to the full ``timeout_s``. Tri-state: both signals are
-            # None on the first poll (no prev_diag); `is True` keeps unknown
-            # liveness from blocking the grace cap, preserving #591's fast
-            # reap of genuinely quiescent husks.
-            demonstrably_busy = cpu_active is True or tree_active is True
-            effective_deadline = deadline
-            limbo_grace_applied = False
-            if (
-                grace_deadline is not None
-                and grace_deadline < deadline
-                and not live_bg
-                and not demonstrably_busy
-            ):
-                effective_deadline = grace_deadline
-                limbo_grace_applied = True
-
-            # #650 (defect 3): per-tick observability, throttled to ~30 s.
-            # Previously nothing logged between the one-shot limbo warning
-            # and the loop's exit — a blackout in which the bridge's stall
-            # detector raced this loop's returncode poll and won.
-            now_mono = time.monotonic()
-            if now_mono - last_tick_log_at >= self._subcountdown_tick_log_interval_s:
-                last_tick_log_at = now_mono
-                run_logger.info(
-                    "claude.post_result_idle.subcountdown_tick",
-                    session_id=sid,
-                    pid=proc.pid,
-                    elapsed_s=round(elapsed, 1),
-                    in_limbo=limbo_logged,
-                    live_background_work=live_bg,
-                    cpu_active=cpu_active,
-                    tree_active=tree_active,
-                    child_count=len(diag.child_pids) if diag else None,
-                    rss_kb=diag.rss_kb if diag else None,
-                    deadline_remaining_s=round(effective_deadline - now_mono, 1),
-                )
-
-            if time.monotonic() >= effective_deadline:
-                # #647/#646: liveness-aware ceiling. Upstream runs subagents
-                # in the background by default (Claude Code ≥2.1.198) and
-                # never signals their completion on stream-json, so the only
-                # evidence is /proc. If background handles are still live and
-                # the process tree is not demonstrably idle, defer the
-                # SIGTERM — killing live subagent work quarantines the
-                # session (#632) and produces fresh-session amnesia. Bounded
-                # twice over: handles age out at BG_AGENT_MAX_KEEP_S, and the
-                # hold never exceeds ``bg_hold`` seconds past reader-EOF.
-                demonstrably_idle = (
-                    diag is not None
-                    and diag.alive
-                    and cpu_active is False
-                    and tree_active is False
-                )
-                if (
-                    bg_hold > 0
-                    and elapsed < bg_hold
-                    and live_bg
-                    and not demonstrably_idle
-                ):
-                    if not ceiling_extended_logged:
-                        ceiling_extended_logged = True
-                        run_logger.info(
-                            "claude.post_result_idle.ceiling_extended",
-                            session_id=sid,
+                    if stream is not None:
+                        self._transition_lifecycle(
+                            stream,
+                            "limbo",
+                            run_logger,
                             pid=proc.pid,
-                            elapsed_s=round(elapsed, 1),
-                            timeout_s=timeout_s,
-                            bg_max_hold_s=bg_hold,
-                            cpu_active=cpu_active,
-                            tree_active=tree_active,
-                            child_count=len(diag.child_pids) if diag else None,
+                            session_id=sid,
+                            seconds_since_reader_done=round(elapsed, 1),
                         )
-                    continue
-                # #632 (W2): the process already emitted a valid result but
-                # is being force-killed while lingering (MCP children / hung
-                # background work) — its last upstream turn may be left
-                # dangling on the far side, making the session unsafe to
-                # resume. Record the marker BEFORE sending SIGTERM. A store
-                # failure must never block teardown, hence the narrow
-                # try/except. SIGKILL (below) always follows this same
-                # branch on the same pass, so recording once here is
-                # sufficient — no second record site needed at sigkill.
-                quarantined = False
+
+                # #591: cap the deadline at the limbo grace when the session is
+                # fully quiescent — no live background work means nothing can
+                # legitimately produce output any more (pending requests/asks
+                # were handled above via the re-arm branch).
+                #
+                # #655: `not live_bg` alone is NOT quiescence — it only means no
+                # *registered* background handle. A process can be busy with
+                # direct work (waiting on a build, a slow MCP call, a poll loop)
+                # with live_bg False. Consult the same liveness signals the
+                # extension gate below uses, so a demonstrably-busy process falls
+                # through to the full ``timeout_s``. Tri-state: both signals are
+                # None on the first poll (no prev_diag); `is True` keeps unknown
+                # liveness from blocking the grace cap, preserving #591's fast
+                # reap of genuinely quiescent husks.
+                demonstrably_busy = cpu_active is True or tree_active is True
+                effective_deadline = deadline
+                limbo_grace_applied = False
                 if (
-                    stream is not None
-                    and stream.did_emit_completed
-                    and sid is not None
-                    and _load_quarantine_on_forced_teardown()
+                    grace_deadline is not None
+                    and grace_deadline < deadline
+                    and not live_bg
+                    and not demonstrably_busy
                 ):
-                    try:
-                        get_quarantine_store().quarantine(
-                            self.engine, sid, reason="forced_teardown_after_result"
-                        )
-                        quarantined = True
-                    except Exception:  # noqa: BLE001 — never let a
-                        # quarantine store failure break subprocess teardown.
-                        run_logger.debug(
-                            "session.quarantine_record_failed", exc_info=True
-                        )
-                # Timeout: SIGTERM the process group (start_new_session=True
-                # so PID == pgid). 5 s grace, then SIGKILL.
-                run_logger.warning(
-                    "claude.post_result_idle.sigterm_after_timeout",
-                    session_id=sid,
-                    pid=proc.pid,
-                    timeout_s=timeout_s,
-                    elapsed_s=round(elapsed, 1),
-                    limbo_grace_applied=limbo_grace_applied,
-                    limbo_grace_s=grace if limbo_grace_applied else None,
-                    quarantined=quarantined,
-                    # #647: "background work was correctly tracked and killed
-                    # anyway" is identified by live_background_work=True here,
-                    # regardless of which resume-divert label lands later.
-                    live_background_work=live_bg,
-                    bg_hold_extended=ceiling_extended_logged,
-                    bg_max_hold_s=bg_hold,
-                    cpu_active=cpu_active,
-                    tree_active=tree_active,
-                )
-                if stream is not None:
-                    self._transition_lifecycle(
-                        stream,
-                        "sigterm_sent",
-                        run_logger,
-                        pid=proc.pid,
+                    effective_deadline = grace_deadline
+                    limbo_grace_applied = True
+
+                # #650 (defect 3): per-tick observability, throttled to ~30 s.
+                # Previously nothing logged between the one-shot limbo warning
+                # and the loop's exit — a blackout in which the bridge's stall
+                # detector raced this loop's returncode poll and won.
+                now_mono = time.monotonic()
+                if (
+                    now_mono - last_tick_log_at
+                    >= self._subcountdown_tick_log_interval_s
+                ):
+                    last_tick_log_at = now_mono
+                    run_logger.info(
+                        "claude.post_result_idle.subcountdown_tick",
                         session_id=sid,
+                        pid=proc.pid,
+                        elapsed_s=round(elapsed, 1),
+                        in_limbo=limbo_logged,
+                        live_background_work=live_bg,
+                        cpu_active=cpu_active,
+                        tree_active=tree_active,
+                        child_count=len(diag.child_pids) if diag else None,
+                        rss_kb=diag.rss_kb if diag else None,
+                        deadline_remaining_s=round(effective_deadline - now_mono, 1),
                     )
-                    # #631 (W5-diag): record on the stream itself so the
-                    # runner.empty_result diagnostic (in the bridge, on a
-                    # SUBSEQUENT message) can see that a forced teardown
-                    # happened during this run.
-                    stream.sigterm_sent = True
-                # #590: descendant-aware — bare killpg missed MCP chains
-                # that re-parented into separate sessions/pgroups.
-                signal_pid_group(proc.pid, signal.SIGTERM)
-                # Give MCP children configured grace to clean up.
-                grace_deadline = time.monotonic() + self._subcountdown_sigterm_grace_s
-                while time.monotonic() < grace_deadline:
-                    await anyio.sleep(self._subcountdown_sigterm_grace_poll_s)
-                    if proc.returncode is not None:
-                        if stream is not None:
-                            self._transition_lifecycle(
-                                stream,
-                                "exited",
-                                run_logger,
-                                pid=proc.pid,
+
+                if time.monotonic() >= effective_deadline:
+                    # #647/#646: liveness-aware ceiling. Upstream runs subagents
+                    # in the background by default (Claude Code ≥2.1.198) and
+                    # never signals their completion on stream-json, so the only
+                    # evidence is /proc. If background handles are still live and
+                    # the process tree is not demonstrably idle, defer the
+                    # SIGTERM — killing live subagent work quarantines the
+                    # session (#632) and produces fresh-session amnesia. Bounded
+                    # twice over: handles age out at BG_AGENT_MAX_KEEP_S, and the
+                    # hold never exceeds ``bg_hold`` seconds past reader-EOF.
+                    demonstrably_idle = (
+                        diag is not None
+                        and diag.alive
+                        and cpu_active is False
+                        and tree_active is False
+                    )
+                    if (
+                        bg_hold > 0
+                        and elapsed < bg_hold
+                        and live_bg
+                        and not demonstrably_idle
+                    ):
+                        if not ceiling_extended_logged:
+                            ceiling_extended_logged = True
+                            run_logger.info(
+                                "claude.post_result_idle.ceiling_extended",
                                 session_id=sid,
-                                rc=proc.returncode,
+                                pid=proc.pid,
+                                elapsed_s=round(elapsed, 1),
+                                timeout_s=timeout_s,
+                                bg_max_hold_s=bg_hold,
+                                cpu_active=cpu_active,
+                                tree_active=tree_active,
+                                child_count=len(diag.child_pids) if diag else None,
                             )
-                        return "reader_done_but_alive_timeout"
-                # Still alive — SIGKILL the group.
-                run_logger.warning(
-                    "claude.post_result_idle.sigkill_after_grace",
-                    session_id=sid,
-                    pid=proc.pid,
-                )
-                if stream is not None:
-                    self._transition_lifecycle(
-                        stream,
-                        "sigkill_sent",
-                        run_logger,
-                        pid=proc.pid,
+                        continue
+                    # #632 (W2): the process already emitted a valid result but
+                    # is being force-killed while lingering (MCP children / hung
+                    # background work) — its last upstream turn may be left
+                    # dangling on the far side, making the session unsafe to
+                    # resume. Record the marker BEFORE sending SIGTERM. A store
+                    # failure must never block teardown, hence the narrow
+                    # try/except. SIGKILL (below) always follows this same
+                    # branch on the same pass, so recording once here is
+                    # sufficient — no second record site needed at sigkill.
+                    quarantined = False
+                    if (
+                        stream is not None
+                        and stream.did_emit_completed
+                        and sid is not None
+                        and _load_quarantine_on_forced_teardown()
+                    ):
+                        try:
+                            get_quarantine_store().quarantine(
+                                self.engine, sid, reason="forced_teardown_after_result"
+                            )
+                            quarantined = True
+                        except Exception:  # noqa: BLE001 — never let a
+                            # quarantine store failure break subprocess teardown.
+                            run_logger.debug(
+                                "session.quarantine_record_failed", exc_info=True
+                            )
+                    # Timeout: SIGTERM the process group (start_new_session=True
+                    # so PID == pgid). 5 s grace, then SIGKILL.
+                    run_logger.warning(
+                        "claude.post_result_idle.sigterm_after_timeout",
                         session_id=sid,
+                        pid=proc.pid,
+                        timeout_s=timeout_s,
+                        elapsed_s=round(elapsed, 1),
+                        limbo_grace_applied=limbo_grace_applied,
+                        limbo_grace_s=grace if limbo_grace_applied else None,
+                        quarantined=quarantined,
+                        # #647: "background work was correctly tracked and killed
+                        # anyway" is identified by live_background_work=True here,
+                        # regardless of which resume-divert label lands later.
+                        live_background_work=live_bg,
+                        bg_hold_extended=ceiling_extended_logged,
+                        bg_max_hold_s=bg_hold,
+                        cpu_active=cpu_active,
+                        tree_active=tree_active,
                     )
-                signal_pid_group(proc.pid, signal.SIGKILL)
-                return "reader_done_but_alive_timeout"
+                    if stream is not None:
+                        self._transition_lifecycle(
+                            stream,
+                            "sigterm_sent",
+                            run_logger,
+                            pid=proc.pid,
+                            session_id=sid,
+                        )
+                        # #631 (W5-diag): record on the stream itself so the
+                        # runner.empty_result diagnostic (in the bridge, on a
+                        # SUBSEQUENT message) can see that a forced teardown
+                        # happened during this run.
+                        stream.sigterm_sent = True
+                    # #590: descendant-aware — bare killpg missed MCP chains
+                    # that re-parented into separate sessions/pgroups.
+                    signal_pid_group(proc.pid, signal.SIGTERM)
+                    # Give MCP children configured grace to clean up.
+                    grace_deadline = (
+                        time.monotonic() + self._subcountdown_sigterm_grace_s
+                    )
+                    while time.monotonic() < grace_deadline:
+                        await anyio.sleep(self._subcountdown_sigterm_grace_poll_s)
+                        if proc.returncode is not None:
+                            if stream is not None:
+                                self._transition_lifecycle(
+                                    stream,
+                                    "exited",
+                                    run_logger,
+                                    pid=proc.pid,
+                                    session_id=sid,
+                                    rc=proc.returncode,
+                                )
+                            exit_reason_log = "timeout_sigterm_reaped"
+                            return "reader_done_but_alive_timeout"
+                    # Still alive — SIGKILL the group.
+                    run_logger.warning(
+                        "claude.post_result_idle.sigkill_after_grace",
+                        session_id=sid,
+                        pid=proc.pid,
+                    )
+                    if stream is not None:
+                        self._transition_lifecycle(
+                            stream,
+                            "sigkill_sent",
+                            run_logger,
+                            pid=proc.pid,
+                            session_id=sid,
+                        )
+                    signal_pid_group(proc.pid, signal.SIGKILL)
+                    exit_reason_log = "timeout_sigkill"
+                    return "reader_done_but_alive_timeout"
+        finally:
+            # #699: exactly ONE liveness line per subcountdown, at exit rather
+            # than on the 30 s cadence — so a 15 s reap is observable for the
+            # first time. Strictly less volume than the tick on any long
+            # countdown, and it does not disturb #650's blackout fix (that tick
+            # stays; this is a terminal line). ``session_id`` rather than the
+            # loop-local ``sid`` because the fast path can return before ``sid``
+            # is ever assigned.
+            run_logger.info(
+                "claude.post_result_idle.subcountdown_exit",
+                session_id=session_id,
+                pid=proc.pid,
+                elapsed_s=round(time.monotonic() - reader_done_at, 1),
+                polls=poll_count,
+                cpu_active=cpu_active,
+                tree_active=tree_active,
+                live_background_work=live_bg,
+                in_limbo=limbo_logged,
+                limbo_grace_applied=limbo_grace_applied,
+                exit_reason=exit_reason_log,
+            )
 
     def translate(
         self,

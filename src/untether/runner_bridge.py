@@ -15,7 +15,7 @@ import anyio
 from .context import RunContext
 from .error_hints import get_error_hint as _get_error_hint
 from .logging import bind_run_context, get_logger
-from .markdown import format_meta_line, render_event_cli
+from .markdown import _short_model_name, format_meta_line, render_event_cli
 from .model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent, UntetherEvent
 from .presenter import Presenter
 from .progress import ProgressTracker
@@ -54,6 +54,33 @@ class _StuckAfterToolResultState:
 # npm bridge) is the specific adapter implicated in #322; other
 # `@modelcontextprotocol/*` stdio bridges share the same failure mode.
 _MCP_ADAPTER_CMDLINE_HINTS = ("mcp-remote", "@modelcontextprotocol")
+
+
+def _model_log_fields(meta: dict[str, Any] | None) -> dict[str, object]:
+    """#695: resolved model as loggable fields, or ``{}`` when unknown.
+
+    The model lives only in ``StartedEvent.meta``, which until now was
+    consumed for rendering and never logged — so a footer regression like
+    #688 (``claude-opus-5[1m]`` shortening to a bare ``opus``, silently
+    dropping the 1M-context marker) was invisible to log-side auditing and
+    to the log-only ``untether-issue-watcher``.
+
+    Both halves are logged deliberately: ``model`` is the raw ID from the
+    engine, ``model_display`` is the *same string the footer renders*, taken
+    from ``_short_model_name`` rather than re-derived, so the pair makes a
+    shortener regression self-evident from logs alone.
+
+    Returns an empty dict rather than ``model=None`` when meta carries no
+    model — some engines ship it late (pi sends the model from
+    ``message_end`` via a supplementary ``StartedEvent``, per
+    ``.claude/rules/runner-development.md``), and an absent key reads as
+    "not reported" where ``None`` reads as "reported as nothing".
+    """
+    model = (meta or {}).get("model")
+    if not isinstance(model, str) or not model:
+        return {}
+    return {"model": model, "model_display": _short_model_name(model)}
+
 
 # ---------------------------------------------------------------------------
 # Ephemeral message registry
@@ -3261,6 +3288,9 @@ async def run_runner_with_cancel(
         cancelled=outcome.cancelled,
         ok=outcome.completed.ok if outcome.completed else None,
         stall_suppressions=suppression_summary,
+        # #695: both events carry the model so a single grep over either
+        # answers "which model ran this session?".
+        **_model_log_fields(edits.tracker.meta),
     )
     if event_count == 0 and not outcome.cancelled:
         logger.warning(
@@ -3943,6 +3973,10 @@ async def handle_message(
             action_count=progress_tracker.action_count,
             resume=resume_value,
             **usage_log,
+            # #695: per-run model attribution. Also gives the cost fields
+            # above something to attribute to — `total_cost_usd` was
+            # previously logged with no record of which model produced it.
+            **_model_log_fields(progress_tracker.meta),
         )
         # Record session stats for /stats command
         from .session_stats import record_run as _record_stats_run

@@ -6616,3 +6616,270 @@ def test_ok_result_does_not_latch(clean_reset_latch) -> None:
         factory=state.factory,
     )
     assert clean_reset_latch == {}
+
+
+# ---------------------------------------------------------------------------
+# #696 — pre-result post_result_idle.tick reports MEASURED pending state
+# ---------------------------------------------------------------------------
+
+
+def _log_kwargs(logger: _RecordingLogger, event: str) -> list[dict]:
+    """Every kwargs payload logged under ``event``, in order."""
+    return [kw for _lvl, name, kw in logger.records if name == event]
+
+
+async def _run_pre_result_watchdog(
+    monkeypatch, *, sid: str, channel_id: int
+) -> _RecordingLogger:
+    """Drive ``_post_result_idle_watchdog`` far enough to emit one pre-result
+    tick, then cancel. Shared by the two #696 tests."""
+    from untether.runners.claude import ClaudeRunner
+    from untether.runners.run_options import EngineRunOptions, apply_run_options
+    from untether.utils.paths import reset_run_channel_id, set_run_channel_id
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value=sid))
+    # Pre-result: the first ``result`` event has NOT landed.
+    state.result_received_at = None
+
+    real_sleep = anyio.sleep
+
+    async def fast_sleep(s: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr("untether.runners.claude.anyio.sleep", fast_sleep)
+
+    class _FakeStdin:
+        async def aclose(self) -> None:  # pragma: no cover - never reached
+            pass
+
+    logger = _RecordingLogger()
+    runner = ClaudeRunner(claude_cmd="claude")
+    token = set_run_channel_id(channel_id)
+    try:
+        with apply_run_options(EngineRunOptions(loop_enabled=False)):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(
+                    runner._post_result_idle_watchdog,
+                    state,
+                    _FakeStdin(),
+                    anyio.Event(),
+                    logger,
+                    600.0,
+                )
+                with anyio.move_on_after(2.0):
+                    while not _log_kwargs(logger, "claude.post_result_idle.tick"):
+                        await real_sleep(0)
+                tg.cancel_scope.cancel()
+    finally:
+        reset_run_channel_id(token)
+    return logger
+
+
+@pytest.mark.anyio
+async def test_696_pre_result_tick_reports_measured_pending_ask(monkeypatch) -> None:
+    """#696: a pre-result tick MUST measure pending_asks/pending_requests.
+
+    Before the fix the ``armed_at is None`` branch emitted both as literal
+    ``0`` while the post-result branch computed them — so a session sitting
+    on a visibly pending approval keyboard logged zeros every 30s and read
+    as a presenter/runner desync.
+    """
+    from untether.runners.claude import _PENDING_ASK_REQUESTS, _REQUEST_TO_SESSION
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    sid = "pre-result-pending-session"
+    # One pending control request and one pending ask owned by this session
+    # — the shape of a plan-mode approval wait.
+    _REQUEST_TO_SESSION["req_ctrl_1"] = sid
+    _REQUEST_TO_SESSION["req_ask_1"] = sid
+    _PENDING_ASK_REQUESTS["req_ask_1"] = (4242, "Which option?")
+    # A third request owned by a DIFFERENT session must not be counted.
+    _REQUEST_TO_SESSION["req_other"] = "some-other-session"
+
+    try:
+        logger = await _run_pre_result_watchdog(monkeypatch, sid=sid, channel_id=4242)
+    finally:
+        _REQUEST_TO_SESSION.clear()
+        _PENDING_ASK_REQUESTS.clear()
+
+    ticks = _log_kwargs(logger, "claude.post_result_idle.tick")
+    assert ticks, "pre-result tick must still fire"
+    tick = ticks[0]
+    assert tick["armed"] is False, "this must be the pre-result branch"
+    assert tick["session_id"] == sid
+    # Load-bearing: measured, not literal zero, and scoped to this session.
+    assert tick["pending_requests"] == 2
+    assert tick["pending_asks"] == 1
+
+
+@pytest.mark.anyio
+async def test_696_pre_result_tick_zero_when_nothing_pending(monkeypatch) -> None:
+    """#696 negative control: a genuinely idle pre-result tick still reads 0.
+
+    Guards against the fix turning every pre-result tick into a false
+    "waiting on the user" marker.
+    """
+    from untether.runners.claude import _PENDING_ASK_REQUESTS, _REQUEST_TO_SESSION
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    logger = await _run_pre_result_watchdog(
+        monkeypatch, sid="pre-result-idle", channel_id=4243
+    )
+
+    tick = _log_kwargs(logger, "claude.post_result_idle.tick")[0]
+    assert tick["armed"] is False
+    assert tick["pending_requests"] == 0
+    assert tick["pending_asks"] == 0
+
+
+# ---------------------------------------------------------------------------
+# #699 — one subcountdown_exit liveness line per subcountdown
+# ---------------------------------------------------------------------------
+
+
+class _ReapAfterPollsProc:
+    """Subprocess stub whose ``returncode`` flips to 0 after N reads.
+
+    Distinct from ``_FakeProc`` above, which holds a fixed returncode: these
+    tests need a subprocess that is alive on entry and reaped mid-loop, which
+    is the fast-reap shape #699 is about.
+    """
+
+    def __init__(self, pid: int = 987654, exit_after: int = 1) -> None:
+        self.pid = pid
+        self._exit_after = exit_after
+        self._reads = 0
+        self._returncode: int | None = None
+
+    @property
+    def returncode(self) -> int | None:
+        rc = self._returncode
+        self._reads += 1
+        if self._reads > self._exit_after:
+            self._returncode = 0
+        return rc
+
+
+@pytest.mark.anyio
+async def test_699_short_subcountdown_emits_exit_line() -> None:
+    """#699: a subcountdown shorter than the 30s tick throttle MUST still
+    emit exactly one liveness line.
+
+    Three subcountdowns on nsd (15s / 20s / 10s) each computed ``cpu_active``
+    several times and discarded every one, because the only exits to a log
+    line were the ~30s throttled ``subcountdown_tick`` and the one-shot
+    ``limbo_detected``. That blackout blocked #689's Linux-collateral
+    verification for 7 of 12 audit passes.
+    """
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.01
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="short-subcountdown"))
+    state.result_received_at = time.monotonic()
+
+    logger = _RecordingLogger()
+    proc = _ReapAfterPollsProc(exit_after=1)
+
+    reason = await runner._post_result_subcountdown(
+        state=state,
+        proc=proc,
+        run_logger=logger,
+        timeout_s=600.0,
+        stream=None,
+        session_id="short-subcountdown",
+        limbo_grace_s=0.0,
+        bg_max_hold_s=0.0,
+    )
+
+    assert reason == "subprocess_exited_during_subcountdown"
+
+    # The 30s throttled tick did NOT fire — precisely the blackout #699
+    # describes, and the reason the exit line has to exist.
+    assert not _log_kwargs(logger, "claude.post_result_idle.subcountdown_tick")
+
+    exits = _log_kwargs(logger, "claude.post_result_idle.subcountdown_exit")
+    assert len(exits) == 1, "exactly one exit line per subcountdown"
+    line = exits[0]
+    assert line["exit_reason"] == "subprocess_exited"
+    assert line["session_id"] == "short-subcountdown"
+    assert line["pid"] == proc.pid
+    assert line["polls"] >= 1
+    assert line["in_limbo"] is False
+    # No prev_diag on a single poll, so the verdict is legitimately unknown.
+    assert line["cpu_active"] is None
+    assert line["tree_active"] is None
+
+
+@pytest.mark.anyio
+async def test_699_subcountdown_exit_carries_last_liveness_verdict(
+    monkeypatch,
+) -> None:
+    """#699: the exit line carries the LAST computed cpu/tree verdict.
+
+    This is the sample previously computed per-poll and thrown away —
+    without it, #689's ``demonstrably_busy`` gate is unobservable on any
+    subcountdown that ends inside 30s.
+    """
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.utils.proc_diag import ProcessDiag
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    monkeypatch.setattr(
+        "untether.utils.proc_diag.collect_proc_diag",
+        lambda pid: ProcessDiag(pid=pid, alive=True, cpu_utime=1, cpu_stime=0),
+    )
+    monkeypatch.setattr(
+        "untether.utils.proc_diag.is_cpu_active", lambda prev, curr: True
+    )
+    monkeypatch.setattr(
+        "untether.utils.proc_diag.is_tree_cpu_active", lambda prev, curr: False
+    )
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.01
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="busy-subcountdown"))
+    state.result_received_at = time.monotonic()
+
+    logger = _RecordingLogger()
+    # Exit on the 3rd poll so prev_diag exists and a real verdict is computed.
+    proc = _ReapAfterPollsProc(exit_after=3)
+
+    await runner._post_result_subcountdown(
+        state=state,
+        proc=proc,
+        run_logger=logger,
+        timeout_s=600.0,
+        stream=None,
+        session_id="busy-subcountdown",
+        limbo_grace_s=0.0,
+        bg_max_hold_s=0.0,
+    )
+
+    line = _log_kwargs(logger, "claude.post_result_idle.subcountdown_exit")[0]
+    assert line["cpu_active"] is True
+    assert line["tree_active"] is False
+    assert line["exit_reason"] == "subprocess_exited"
+    assert line["polls"] >= 2
