@@ -772,43 +772,133 @@ def test_jsonl_stream_state_recent_events_ring_buffer() -> None:
 # ===========================================================================
 
 
-def test_recent_event_is_control_request_true_when_last_label_matches() -> None:
-    """#526 rc20: the watchdog uses ``recent_events[-1] == 'control_request'``
-    as its approval-pending signal so a session waiting on an
-    ExitPlanMode/CanUseTool/AskUserQuestion approval doesn't flood the
-    operator dashboard with ``subprocess.liveness_stall`` WARNs.
+def test_approval_pending_true_when_control_request_is_newest() -> None:
+    """#526 rc20: the watchdog needs an approval-pending signal so a session
+    waiting on an ExitPlanMode/CanUseTool/AskUserQuestion approval doesn't
+    flood the operator dashboard with ``subprocess.liveness_stall`` WARNs.
     """
-    from untether.runner import JsonlStreamState, _recent_event_is_control_request
+    from untether.runner import JsonlStreamState, _approval_pending
 
     stream = JsonlStreamState(expected_session=None)
     stream.recent_events.append((1.0, "assistant"))
     stream.recent_events.append((2.0, "control_request"))
 
-    assert _recent_event_is_control_request(stream) is True
+    assert _approval_pending(stream) is True
 
 
-def test_recent_event_is_control_request_false_when_resolved() -> None:
+def test_approval_pending_false_when_resolved() -> None:
     """Once the approval resolves and Claude emits a ``control_response``
     (followed by assistant work), the predicate must report False — the
     session is no longer awaiting user input and a subsequent stall
     SHOULD escalate to the normal WARN path."""
-    from untether.runner import JsonlStreamState, _recent_event_is_control_request
+    from untether.runner import JsonlStreamState, _approval_pending
 
     stream = JsonlStreamState(expected_session=None)
     stream.recent_events.append((1.0, "control_request"))
     stream.recent_events.append((2.0, "control_response"))
     stream.recent_events.append((3.0, "assistant"))
 
-    assert _recent_event_is_control_request(stream) is False
+    assert _approval_pending(stream) is False
 
 
-def test_recent_event_is_control_request_false_when_buffer_empty() -> None:
+def test_approval_pending_false_when_buffer_empty() -> None:
     """A fresh subprocess with no JSONL events yet is not approval-pending
     — return False rather than raising IndexError."""
-    from untether.runner import JsonlStreamState, _recent_event_is_control_request
+    from untether.runner import JsonlStreamState, _approval_pending
+
+    assert _approval_pending(JsonlStreamState(expected_session=None)) is False
+
+
+def test_approval_pending_survives_same_tick_rate_limit_event() -> None:
+    """#697: the discriminator must not be positional. A ``rate_limit_event``
+    arriving in the same tick as the ``control_request`` took the last ring
+    slot on nsd and demoted a 10-minute approval wait back to a
+    ``subprocess.liveness_stall`` WARN with ``approval_pending=False``.
+
+    Verbatim ring buffer from the nsd occurrence (session b081a873).
+    """
+    from untether.runner import JsonlStreamState, _approval_pending
 
     stream = JsonlStreamState(expected_session=None)
-    assert _recent_event_is_control_request(stream) is False
+    for label in (
+        "assistant",
+        "assistant",
+        "assistant",
+        "control_request",
+        "rate_limit_event",
+    ):
+        stream.recent_events.append((47024.0, label))
+
+    assert _approval_pending(stream) is True
+
+
+def test_approval_pending_transparent_to_tool_noise() -> None:
+    """Events that neither request nor resolve an approval (tool frames,
+    system notices) are transparent to the backward scan — only a genuine
+    resolving event stops it."""
+    from untether.runner import JsonlStreamState, _approval_pending
+
+    stream = JsonlStreamState(expected_session=None)
+    stream.recent_events.append((1.0, "control_request"))
+    stream.recent_events.append((2.0, "tool:Bash"))
+    stream.recent_events.append((3.0, "system"))
+
+    assert _approval_pending(stream) is True
+
+
+def test_approval_pending_prefers_engine_state_registry() -> None:
+    """#697: the authoritative signal is the engine's own unanswered
+    control-request registry (``awaiting_user_approval``), reached by the
+    same ``engine_state`` duck-typing the bridge-side predicate uses. It
+    must win over a ring buffer whose ``control_request`` has already
+    scrolled out of the 10-entry window."""
+    from untether.runner import JsonlStreamState, _approval_pending
+
+    class _EngineState:
+        def awaiting_user_approval(self) -> bool:
+            return True
+
+    stream = JsonlStreamState(expected_session=None)
+    stream.engine_state = _EngineState()
+    stream.recent_events.append((1.0, "user"))
+    stream.recent_events.append((2.0, "assistant"))
+
+    assert _approval_pending(stream) is True
+
+
+def test_approval_pending_falls_back_when_probe_raises() -> None:
+    """A raising probe must never take the watchdog down or silently swallow
+    the ring-buffer signal — fall back to the scan."""
+    from untether.runner import JsonlStreamState, _approval_pending
+
+    class _Exploding:
+        def awaiting_user_approval(self) -> bool:
+            raise RuntimeError("boom")
+
+    stream = JsonlStreamState(expected_session=None)
+    stream.engine_state = _Exploding()
+    stream.recent_events.append((1.0, "control_request"))
+
+    assert _approval_pending(stream) is True
+
+
+def test_approval_pending_false_when_engine_reports_no_pending() -> None:
+    """A non-Claude engine (no probe) and a Claude session with an empty
+    registry and a resolved ring buffer both report False, so a genuine
+    post-approval hang still escalates to WARN."""
+    from untether.runner import JsonlStreamState, _approval_pending
+
+    class _EngineState:
+        def awaiting_user_approval(self) -> bool:
+            return False
+
+    stream = JsonlStreamState(expected_session=None)
+    stream.engine_state = _EngineState()
+    stream.recent_events.append((1.0, "control_request"))
+    stream.recent_events.append((2.0, "user"))
+    stream.recent_events.append((3.0, "assistant"))
+
+    assert _approval_pending(stream) is False
 
 
 def test_approval_pending_refire_constant_is_30_min() -> None:
@@ -886,6 +976,63 @@ async def test_watchdog_demotes_to_approval_pending_when_control_request_recent(
     # The latch (liveness_stalls counter) must NOT have been bumped — that
     # field is reserved for the WARN path so session.summary still reflects
     # approval-pending separately from actual liveness fires.
+    assert stream.liveness_stalls == 0
+
+
+@pytest.mark.anyio
+async def test_watchdog_demotes_when_rate_limit_event_follows_control_request(
+    tmp_path,
+) -> None:
+    """#697 end-to-end: a ``rate_limit_event`` landing after the
+    ``control_request`` (nsd's steady state — plan-mode approval + subscription
+    throttling) must NOT flip the approval wait back to a
+    ``subprocess.liveness_stall`` WARN. The WARN branch latches
+    ``liveness_warned``, burning the run's one-shot stall canary, and falls
+    through to the auto-kill check.
+    """
+    from structlog.testing import capture_logs
+
+    thread_id = "019b73c4-0c3f-7701-a0bb-aac6b4d8a3be"
+    codex_path = tmp_path / "codex"
+    codex_path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import sys\n"
+        "import time\n"
+        "\n"
+        "sys.stdin.read()\n"
+        f"print(json.dumps({{'type': 'thread.started', 'thread_id': '{thread_id}'}}), flush=True)\n"
+        "print(json.dumps({'type': 'control_request', 'request_id': 'req_1'}), flush=True)\n"
+        "print(json.dumps({'type': 'rate_limit_event'}), flush=True)\n"
+        "time.sleep(1.0)\n",
+        encoding="utf-8",
+    )
+    codex_path.chmod(0o755)
+
+    runner = CodexRunner(codex_cmd=str(codex_path), extra_args=[])
+    runner._LIVENESS_TIMEOUT_SECONDS = 0.2
+    runner._WATCHDOG_POLL_SECONDS = 0.05
+    runner._WATCHDOG_GRACE_SECONDS = 0.5
+
+    with capture_logs() as logs:
+        with anyio.fail_after(5):
+            _ = [evt async for evt in runner.run("hi", None)]
+
+    stream = runner.current_stream
+    assert stream is not None
+    assert stream.recent_events[-1][1] == "rate_limit_event"
+
+    liveness_warns = [r for r in logs if r.get("event") == "subprocess.liveness_stall"]
+    assert liveness_warns == [], (
+        f"A same-tick rate_limit_event must not demote the approval wait back "
+        f"to a WARN, got: {liveness_warns}"
+    )
+    approval_infos = [
+        r for r in logs if r.get("event") == "subprocess.approval_pending"
+    ]
+    assert len(approval_infos) == 1
+    assert approval_infos[0].get("approval_pending") is True
+    # The one-shot stall canary must remain unburnt for a genuine later hang.
     assert stream.liveness_stalls == 0
 
 

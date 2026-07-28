@@ -371,11 +371,13 @@ def pending_control_requests_for_session(session_id: str | None) -> int:
     #495/#499/#500: the stall detector previously inferred this from
     presentation state (``_has_pending_approval`` — the most recent action's
     ``inline_keyboard`` detail) or from the JSONL ring buffer
-    (``_recent_event_is_control_request`` — the newest ring entry). Both are
+    (``_approval_pending`` — then the newest ring entry). Both are
     "most recent thing" heuristics and both go stale during a long approval
     wait: an ExitPlanMode permission request carries no ``inline_keyboard``
     detail, and after hours of waiting the newest ring entry is a stale
-    ``user``/``result`` frame. The registry does not go stale.
+    ``user``/``result`` frame. The registry does not go stale. #697: the
+    watchdog now consults this registry first, keeping a non-positional
+    backward scan of the ring buffer only as a True-only fallback.
 
     The post-result idle watchdog and the pre-result silence cap already
     consult these same registries to decide whether to defer; this helper

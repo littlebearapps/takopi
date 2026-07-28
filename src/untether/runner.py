@@ -161,24 +161,55 @@ _CONTROL_CHANNEL_EVENT_TYPES = frozenset({"control_request", "control_response"}
 _APPROVAL_PENDING_REFIRE_S = 1800.0
 
 
-def _recent_event_is_control_request(stream: JsonlStreamState) -> bool:
-    """True if the most recent JSONL event in the ring buffer is a
-    Claude ``control_request`` frame — i.e. the session is awaiting an
-    approval response on the control channel.
+# #697: ring-buffer labels that mean an outstanding approval has been
+# resolved — the tool ran (its ``tool_result`` arrives as a ``user`` frame),
+# the turn ended, or Claude answered on the control channel. Every other
+# label (``rate_limit_event``, ``assistant``, ``tool:*``, ``system``) is
+# transparent to the backward scan below.
+_APPROVAL_RESOLVING_EVENT_LABELS = frozenset({"control_response", "user", "result"})
 
-    Used by ``_watchdog_loop`` to demote ``subprocess.liveness_stall``
+
+def _approval_pending(stream: JsonlStreamState, logger: Any = None) -> bool:
+    """True while the subprocess is awaiting a user approval on the control
+    channel, rather than genuinely hung.
+
+    Used by ``_subprocess_watchdog`` to demote ``subprocess.liveness_stall``
     WARN → ``subprocess.approval_pending`` INFO, mirroring the bridge-side
-    behaviour added in rc19. The bridge-side predicate inspects the
-    inline-keyboard payload of the most recent action; the watchdog has
-    no access to bridge state, so it consults the JSONL event stream
-    directly. Both signals agree in the common case where Claude emitted
-    a ``control_request`` and we're waiting for the user to click a
-    button (or otherwise resolve the approval).
+    ``ProgressEdits._has_pending_approval``.
+
+    Two signals, in order of authority:
+
+    1. The engine's own unanswered-control-request registry, reached by the
+       same ``engine_state`` duck-typing the bridge uses (Claude's
+       ``awaiting_user_approval`` → ``pending_control_requests_for_session``).
+       It is self-cleaning and does not go stale during a long approval wait.
+       Engines with no control channel simply have no probe.
+    2. A backward scan of the JSONL ring buffer, kept as a True-only
+       fallback for the same reason the bridge keeps its presentation-state
+       check.
+
+    #697: the scan replaces a check on ``recent_events[-1]``, which was
+    positional — on nsd a ``rate_limit_event`` arriving in the same tick as
+    the ``control_request`` took the last slot and flipped a 10-minute
+    approval wait back to a WARN (``approval_pending=False``). That branch
+    latches ``liveness_warned``, burning the run's one-shot stall canary,
+    and falls through to the auto-kill check.
     """
-    if not stream.recent_events:
-        return False
-    _, label = stream.recent_events[-1]
-    return label == "control_request"
+    es = getattr(stream, "engine_state", None)
+    probe = getattr(es, "awaiting_user_approval", None)
+    if callable(probe):
+        try:
+            if probe():
+                return True
+        except Exception as exc:  # noqa: BLE001 - watchdog must not die
+            if logger is not None:
+                logger.debug("subprocess.approval_probe_failed", error=str(exc))
+    for _, label in reversed(stream.recent_events):
+        if label == "control_request":
+            return True
+        if label in _APPROVAL_RESOLVING_EVENT_LABELS:
+            return False
+    return False
 
 
 def _classify_jsonl_event(raw: Any) -> str:
@@ -1197,16 +1228,15 @@ class JsonlSubprocessRunner(BaseRunner):
             ):
                 idle = time.monotonic() - stream.last_stdout_at
                 if idle >= self._LIVENESS_TIMEOUT_SECONDS:
-                    # #526 rc20 follow-up: when the most recent JSONL
-                    # event is a ``control_request``, the subprocess
-                    # is awaiting a user approval — emit a paced
+                    # #526 rc20 follow-up: when the subprocess is awaiting a
+                    # user approval on the control channel, emit a paced
                     # ``subprocess.approval_pending`` INFO instead of
                     # the ``subprocess.liveness_stall`` WARN. Skip the
                     # auto-kill branch entirely (approval-waiting is
                     # by definition not a hang). Without latching
                     # ``liveness_warned`` so a later genuine hang
                     # (post-approval) can still fire the WARN.
-                    if _recent_event_is_control_request(stream):
+                    if _approval_pending(stream, logger):
                         now = time.monotonic()
                         if (
                             last_approval_pending_emit_at == 0.0
