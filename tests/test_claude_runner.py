@@ -6619,6 +6619,155 @@ def test_ok_result_does_not_latch(clean_reset_latch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# #701 — action-based caps carry no reset time; show the remedy, not a timer
+# ---------------------------------------------------------------------------
+
+
+_ACTION_CAP_TEXT = (
+    "You've reached your Fable 5 limit. Run /usage-credits to continue "
+    "or switch models with /model."
+)
+
+
+@pytest.fixture
+def clean_action_latch(monkeypatch):
+    """Isolate the module-level action-required latch and pin the latch key."""
+    from untether.runners import claude as claude_mod
+
+    monkeypatch.setattr(claude_mod, "_RATE_LIMIT_ACTION_LATCH", {})
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    return claude_mod._RATE_LIMIT_ACTION_LATCH
+
+
+def test_parse_action_required_cap_shapes() -> None:
+    from untether.runners.claude import _parse_action_required_cap
+
+    # The nsd 2026-07-27 verbatim string.
+    assert _parse_action_required_cap(_ACTION_CAP_TEXT) == "Fable 5"
+    # Remedy present, no model named → "" (still the action class).
+    assert _parse_action_required_cap("Limit reached. Run /usage-credits.") == ""
+    # Remedy present via the /model spelling only.
+    assert (
+        _parse_action_required_cap(
+            "You've reached your Opus 5 limit. Switch models with /model."
+        )
+        == "Opus 5"
+    )
+
+
+def test_parse_action_required_cap_fail_closed() -> None:
+    """A time-based cap must NOT be claimed as action-required — #692 owns it."""
+    from untether.runners.claude import _parse_action_required_cap
+
+    assert (
+        _parse_action_required_cap(
+            "You've hit your session limit · resets 7:50pm (Australia/Melbourne)"
+        )
+        is None
+    )
+    # "reached your … limit" phrasing without the remedy is not this class.
+    assert _parse_action_required_cap("You've reached your session limit.") is None
+    assert _parse_action_required_cap("") is None
+    assert _parse_action_required_cap(None) is None
+
+
+def test_action_cap_result_latches_and_bare_events_show_remedy(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    """#701 end-to-end: the no-time cap latches, and the next bare
+    rate_limit_event names the remedy instead of implying a ~60s wait."""
+    from untether.runners.claude import DEFAULT_BARE_RATE_LIMIT_WAIT_S
+
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            {
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "num_turns": 20,
+                "duration_ms": 450000,
+                "duration_api_ms": 420000,
+                "session_id": "action-cap-1",
+                "result": _ACTION_CAP_TEXT,
+            }
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert clean_action_latch
+    # No reset clause in this text → #692's latch stays empty.
+    assert clean_reset_latch == {}
+
+    state2 = ClaudeStreamState()
+    events = translate_claude_event(
+        _decode_event({"type": "rate_limit_event"}),
+        title="claude",
+        state=state2,
+        factory=state2.factory,
+    )
+    title = events[0].action.title
+    assert "Fable 5 limit reached" in title
+    assert "/usage-credits" in title
+    assert "/model" in title
+    # The whole point: no countdown copy.
+    assert "waiting to retry" not in title
+    assert "retrying in" not in title
+    # …but the stall detector still gets a deadline so a throttled session is
+    # not mistaken for a hung one.
+    assert state2.rate_limit_wait_until > 0
+    assert state2.rate_limit_total_s == DEFAULT_BARE_RATE_LIMIT_WAIT_S
+
+
+def test_reset_latch_beats_action_latch(clean_action_latch, clean_reset_latch) -> None:
+    """Tier order: a harvested reset time (#692) outranks the action remedy —
+    a real deadline is more actionable than a generic remedy hint."""
+    import time as _time
+
+    clean_reset_latch["default"] = (_time.monotonic() + 1800.0, "7:50pm (UTC)")
+    clean_action_latch["default"] = (_time.monotonic() + 1800.0, "Fable 5")
+
+    state = ClaudeStreamState()
+    events = translate_claude_event(
+        _decode_event({"type": "rate_limit_event"}),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "Rate limited until 7:50pm (UTC)" in events[0].action.title
+
+
+def test_expired_action_latch_pruned(clean_action_latch) -> None:
+    import time as _time
+
+    from untether.runners import claude as claude_mod
+
+    clean_action_latch["default"] = (_time.monotonic() - 5.0, "Fable 5")
+    assert claude_mod._latched_action_required() is None
+    assert clean_action_latch == {}
+
+
+def test_action_latch_falls_back_to_default_when_absent(clean_action_latch) -> None:
+    """#657 regression guard: an unlatched bare event keeps the 60s default."""
+    state = ClaudeStreamState()
+    events = translate_claude_event(
+        _decode_event({"type": "rate_limit_event"}),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "waiting to retry" in events[0].action.title
+
+
+def test_action_title_without_model_name() -> None:
+    from untether.runners.claude import _format_action_required_title
+
+    assert _format_action_required_title("").startswith("⛔ Model limit reached")
+    assert "/usage-credits" in _format_action_required_title("")
+
+
+# ---------------------------------------------------------------------------
 # #696 — pre-result post_result_idle.tick reports MEASURED pending state
 # ---------------------------------------------------------------------------
 

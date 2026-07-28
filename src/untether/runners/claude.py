@@ -728,6 +728,36 @@ _RESET_CLAUSE_RE = re.compile(
 )
 
 
+# #701: the OTHER cap class — "You've reached your Fable 5 limit. Run
+# /usage-credits to continue or switch models with /model." carries no time at
+# all, so #692's result_error tier has nothing to harvest and every subsequent
+# bare event falls through to the #657 60s default. Showing "~60s" for a cap
+# whose remedy is an action (not a wait) is not merely inaccurate — it is the
+# wrong *kind* of answer, and the user waits instead of acting.
+#
+# Keyed by auth namespace like _RATE_LIMIT_RESET_LATCH. Value:
+# (monotonic expiry, model display or "" when the message names no model).
+_RATE_LIMIT_ACTION_LATCH: dict[str, tuple[float, str]] = {}
+
+# Bounded TTL rather than a real deadline: this cap class has no reset time, and
+# nsd's 2026-07-27 window showed one clearing on its own ~15 min later. The latch
+# is only ever *read* while genuinely throttled, so a generous window costs
+# nothing while a short one would drop the remedy mid-throttle.
+ACTION_REQUIRED_LATCH_TTL_S = 30 * 60.0
+
+# Both halves required: the "reached your <X> limit" phrasing alone also appears
+# on time-based caps, and it's the /usage-credits | /model remedy that marks this
+# as the action-required class. Fail closed to #657 when either is absent.
+_ACTION_CAP_RE = re.compile(
+    r"reached\s+your\s+(?P<model>[\w.\- ]{1,40}?)\s+limit",
+    re.IGNORECASE,
+)
+_ACTION_REMEDY_RE = re.compile(
+    r"/usage-credits|switch\s+models\s+with\s+/model",
+    re.IGNORECASE,
+)
+
+
 def _rate_limit_latch_key() -> str:
     return os.environ.get("CLAUDE_CONFIG_DIR") or "default"
 
@@ -815,6 +845,64 @@ def _latched_rate_limit_reset() -> tuple[float, str] | None:
         _RATE_LIMIT_RESET_LATCH.pop(key, None)
         return None
     return remaining, display
+
+
+def _parse_action_required_cap(text: str | None) -> str | None:
+    """#701: recognise the no-reset cap shape and return the model it names
+    ("Fable 5"), or "" when the remedy is present but no model is named.
+
+    ``None`` means "not this cap class" — the caller falls through to the
+    #657 default rather than claiming an action is required.
+    """
+    if not text or _ACTION_REMEDY_RE.search(text) is None:
+        return None
+    m = _ACTION_CAP_RE.search(text)
+    if m is None:
+        return ""
+    return m.group("model").strip()
+
+
+def _maybe_latch_action_required(result_text: str | None) -> None:
+    """#701: arm the action-required latch from a result error so subsequent
+    bare rate_limit_events render the remedy instead of a countdown."""
+    model = _parse_action_required_cap(result_text)
+    if model is None:
+        return
+    _RATE_LIMIT_ACTION_LATCH[_rate_limit_latch_key()] = (
+        time.monotonic() + ACTION_REQUIRED_LATCH_TTL_S,
+        model,
+    )
+    logger.info(
+        "claude.rate_limit_action_required_latched",
+        model=model or None,
+        ttl_s=ACTION_REQUIRED_LATCH_TTL_S,
+        source="result_error",
+    )
+
+
+def _latched_action_required() -> str | None:
+    """Model display from the armed action-required latch, or None when
+    absent/expired (expired entries are pruned)."""
+    key = _rate_limit_latch_key()
+    entry = _RATE_LIMIT_ACTION_LATCH.get(key)
+    if entry is None:
+        return None
+    expiry, model = entry
+    if expiry - time.monotonic() <= 0:
+        _RATE_LIMIT_ACTION_LATCH.pop(key, None)
+        return None
+    return model
+
+
+def _format_action_required_title(model: str) -> str:
+    """#701: name the remedy, and hedge the timer claim — nsd saw one of these
+    caps clear on its own ~15 min later, so a flat "this will never clear"
+    would be its own inaccuracy."""
+    subject = f"{model} limit" if model else "Model limit"
+    return (
+        f"⛔ {subject} reached — may not clear on a timer; "
+        f"run /usage-credits or switch with /model"
+    )
 
 
 def _format_wait_approx(seconds: float) -> str:
@@ -2116,6 +2204,9 @@ def translate_claude_event(
                 # raw result-error text — harvest it for this run's stall
                 # context and for subsequent runs' bare rate_limit_events.
                 _maybe_latch_rate_limit_reset(event.result, state=state)
+                # #701: the other cap class — no time to harvest, but a
+                # remedy to name.
+                _maybe_latch_action_required(event.result)
             usage = _usage_payload(event)
 
             # #572: record the stream-idle classification so the bridge's
@@ -2756,6 +2847,7 @@ def translate_claude_event(
             # accumulate into cumulative_s.
             retry_s_source = "retry_after_ms"
             reset_display: str | None = None
+            action_display: str | None = None
             if retry_s is None:
                 derived = _derive_retry_after_s(info)
                 if derived is not None:
@@ -2771,6 +2863,15 @@ def translate_claude_event(
                     if latched is not None:
                         retry_s, reset_display = latched
                         retry_s_source = "result_error"
+                    elif (action_model := _latched_action_required()) is not None:
+                        # #701: an action-required cap carries no reset time,
+                        # so we still need SOME deadline for the stall
+                        # detector — but the user must not be shown a
+                        # countdown for a cap that a countdown won't clear.
+                        # Same 60s window as #657, different answer on screen.
+                        retry_s = DEFAULT_BARE_RATE_LIMIT_WAIT_S
+                        retry_s_source = "action_required"
+                        action_display = action_model
                     else:
                         # #657: no timing anywhere — latch a conservative
                         # default so awaiting_rate_limit_retry() is
@@ -2804,6 +2905,9 @@ def translate_claude_event(
                     f"⏳ Rate limited until {reset_display} "
                     f"({_format_wait_approx(retry_s)})"
                 )
+            elif retry_s_source == "action_required":
+                # #701: no countdown at all — this cap wants an action.
+                title = _format_action_required_title(action_display or "")
             elif retry_s_source == "default":
                 # A guessed window is shown as an estimate, not as fact
                 title = f"⏳ Rate limited — waiting to retry (~{display_s}s)"
@@ -2841,6 +2945,10 @@ def translate_claude_event(
                 count=state.rate_limit_count,
                 cumulative_s=state.rate_limit_total_s,
                 info=info_payload or None,
+                # #701: greppable the way `result_error` now is — a window of
+                # `retry_after_source=action_required` says the wait was never
+                # going to help, which `default` could not distinguish.
+                action_model=action_display or None,
             )
             return [
                 factory.action_started(
