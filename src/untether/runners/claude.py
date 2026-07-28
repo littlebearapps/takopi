@@ -406,6 +406,18 @@ class AskQuestionState:
 
 # Active AskUserQuestion flows: request_id -> AskQuestionState
 _ASK_QUESTION_FLOWS: dict[str, AskQuestionState] = {}
+
+# #698: flows that were answered and torn down: request_id -> (channel_id, ts).
+# #550 strips the inline keyboard so late taps can't fire
+# ``ask_question.flow_missing``, but that strip is an async outbox edit issued
+# *after* the flow is popped — and a tap already in flight cannot be recalled,
+# so the losing side of that race is unavoidable (1s on nsd; wider in a busy
+# group chat where the edit queues behind other traffic). Remembering the
+# answered flow briefly lets a late tap resolve to "already answered" instead
+# of looking like an unexplained missing flow.
+_ANSWERED_ASK_FLOWS: dict[str, tuple[int, float]] = {}
+ANSWERED_ASK_FLOW_TTL_S: float = 300.0
+_ANSWERED_ASK_FLOWS_MAX = 32
 CONTROL_REQUEST_TIMEOUT_SECONDS: float = 300.0  # 5 minutes
 
 # #374 (rc7): bounded keep for background-agent handles (Agent/Task
@@ -5000,6 +5012,36 @@ async def answer_ask_question(request_id: str, answer: str) -> bool:
     )
 
 
+def _record_answered_ask_flow(request_id: str, channel_id: int) -> None:
+    """Remember that *request_id*'s AskUserQuestion flow was answered (#698)."""
+    now = time.monotonic()
+    for rid, (_ch, ts) in list(_ANSWERED_ASK_FLOWS.items()):
+        if now - ts > ANSWERED_ASK_FLOW_TTL_S:
+            del _ANSWERED_ASK_FLOWS[rid]
+    _ANSWERED_ASK_FLOWS[request_id] = (channel_id, now)
+    while len(_ANSWERED_ASK_FLOWS) > _ANSWERED_ASK_FLOWS_MAX:
+        _ANSWERED_ASK_FLOWS.pop(next(iter(_ANSWERED_ASK_FLOWS)))
+
+
+def recently_answered_ask_flow(channel_id: int | None = None) -> str | None:
+    """Return the request_id of a just-answered AskUserQuestion flow, or None.
+
+    #698: lets the callback handler tell a late tap on an already-answered
+    keyboard ("Already answered", INFO) apart from a genuinely unexplained
+    missing flow (WARNING). Scoped by channel so one chat's late tap cannot
+    claim another chat's answer.
+    """
+    now = time.monotonic()
+    for rid, (ch, ts) in list(_ANSWERED_ASK_FLOWS.items()):
+        if now - ts > ANSWERED_ASK_FLOW_TTL_S:
+            del _ANSWERED_ASK_FLOWS[rid]
+            continue
+        if channel_id is not None and ch != channel_id:
+            continue
+        return rid
+    return None
+
+
 def get_ask_question_flow(
     channel_id: int | None = None,
 ) -> AskQuestionState | None:
@@ -5025,6 +5067,7 @@ async def answer_ask_question_with_options(request_id: str) -> bool:
     _PENDING_ASK_REQUESTS.pop(request_id, None)
     if flow is None:
         return False
+    _record_answered_ask_flow(request_id, flow.channel_id)
 
     # Update the stored input to include answers
     stored_input = _REQUEST_TO_INPUT.get(request_id)

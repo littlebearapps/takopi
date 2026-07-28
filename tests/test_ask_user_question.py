@@ -11,6 +11,7 @@ from untether.events import EventFactory
 from untether.model import ActionEvent, ResumeToken
 from untether.runners.claude import (
     _ACTIVE_RUNNERS,
+    _ANSWERED_ASK_FLOWS,
     _ASK_QUESTION_FLOWS,
     _HANDLED_REQUESTS,
     _PENDING_ASK_REQUESTS,
@@ -20,12 +21,14 @@ from untether.runners.claude import (
     ENGINE,
     AskQuestionState,
     ClaudeStreamState,
+    _record_answered_ask_flow,
     answer_ask_question,
     answer_ask_question_with_options,
     format_question_message,
     get_ask_question_flow,
     get_pending_ask_request,
     get_question_option_buttons,
+    recently_answered_ask_flow,
     translate_claude_event,
 )
 from untether.schemas import claude as claude_schema
@@ -82,6 +85,7 @@ def _clear_registries():
     _HANDLED_REQUESTS.clear()
     _PENDING_ASK_REQUESTS.clear()
     _ASK_QUESTION_FLOWS.clear()
+    _ANSWERED_ASK_FLOWS.clear()
 
 
 # ===========================================================================
@@ -995,3 +999,127 @@ async def test_550_multi_question_edits_twice(monkeypatch) -> None:
     assert ctx2.executor.edit.await_count == 1
     cleared_msg = ctx2.executor.edit.await_args[0][1]
     assert cleared_msg.extra["reply_markup"]["inline_keyboard"] == []
+
+
+# ---------------------------------------------------------------------------
+# #698 — a late option tap after the flow is torn down
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_698_late_tap_reports_already_answered(monkeypatch) -> None:
+    """#698: #550's keyboard strip is an async outbox edit issued *after* the
+    flow is torn down, so a tap landing in the gap (1s on nsd, wider in a busy
+    group chat) hit ``flow is None`` — WARNING plus a success toast for a tap
+    that did nothing. The answered flow is now remembered briefly, so the late
+    tap resolves to a truthful "Already answered".
+    """
+    from structlog.testing import capture_logs
+
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow = AskQuestionState(
+        request_id="req-698-a",
+        channel_id=CHAT_A,
+        questions=[{"question": "Q1", "options": [{"label": "A"}, {"label": "B"}]}],
+    )
+    _ASK_QUESTION_FLOWS[flow.request_id] = flow
+    _ACTIVE_RUNNERS["sess-698a"] = (AsyncMock(), 0.0)
+    _REQUEST_TO_SESSION[flow.request_id] = "sess-698a"
+
+    ctx = _make_command_ctx("opt:0")
+    with capture_logs() as logs:
+        first = await cmd_mod.AskQuestionCommand().handle(ctx)
+        # The user taps a second option before the keyboard-clear edit lands.
+        late = await cmd_mod.AskQuestionCommand().handle(_make_command_ctx("opt:1"))
+
+    assert first is not None and "Answers sent" in first.text
+    assert late is not None
+    assert late.text == "Already answered"
+
+    assert [r for r in logs if r.get("event") == "ask_question.flow_missing"] == []
+    already = [
+        r for r in logs if r.get("event") == "ask_question.flow_already_answered"
+    ]
+    assert len(already) == 1
+    assert already[0]["log_level"] == "info"
+    assert already[0]["action"] == "opt"
+    assert already[0]["request_id"] == "req-698-a"
+
+
+@pytest.mark.anyio
+async def test_698_late_tap_toast_is_truthful() -> None:
+    """The early-answer toast fires before ``handle`` runs, so it is the only
+    thing the user sees on a late tap. It must not claim "Selected" for a tap
+    that did nothing (same user-visible defect as #685)."""
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    backend = cmd_mod.AskQuestionCommand()
+    assert backend.early_answer_toast("opt:0") == "Selected"
+
+    _record_answered_ask_flow("req-698-b", CHAT_A)
+    assert backend.early_answer_toast("opt:0") == "Already answered"
+    assert backend.early_answer_toast("other") == "Already answered"
+
+
+@pytest.mark.anyio
+async def test_698_unknown_tap_still_warns() -> None:
+    """A tap with no flow and no recent answer is genuinely unexplained — keep
+    the WARNING so it stays visible in warn-level triage."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    with capture_logs() as logs:
+        result = await cmd_mod.AskQuestionCommand().handle(_make_command_ctx("opt:0"))
+
+    assert result is not None
+    assert result.text == "No active question"
+    missing = [r for r in logs if r.get("event") == "ask_question.flow_missing"]
+    assert len(missing) == 1
+    assert missing[0]["log_level"] == "warning"
+
+
+@pytest.mark.anyio
+async def test_698_answered_flow_recorded_with_channel() -> None:
+    """``answer_ask_question_with_options`` records the answered flow, scoped by
+    channel so a late tap in one chat cannot claim another chat's answer."""
+    flow = AskQuestionState(
+        request_id="req-698-c",
+        channel_id=CHAT_A,
+        questions=[{"question": "Q1", "options": [{"label": "A"}]}],
+        answers={"Q1": "A"},
+    )
+    _ASK_QUESTION_FLOWS[flow.request_id] = flow
+    mock_runner = AsyncMock()
+    mock_runner.write_control_response.return_value = True
+    _ACTIVE_RUNNERS["sess-698c"] = (mock_runner, 0.0)
+    _REQUEST_TO_SESSION[flow.request_id] = "sess-698c"
+
+    assert await answer_ask_question_with_options(flow.request_id) is True
+
+    assert recently_answered_ask_flow(CHAT_A) == "req-698-c"
+    assert recently_answered_ask_flow(CHAT_B) is None
+    assert recently_answered_ask_flow() == "req-698-c"
+
+
+def test_698_answered_memo_expires_and_is_bounded(monkeypatch) -> None:
+    """The memo is TTL-pruned (a tap hours later is not "recently answered")
+    and hard-capped so a long-lived process cannot accumulate entries."""
+    import untether.runners.claude as claude_mod
+
+    fake_now = 1000.0
+    monkeypatch.setattr(claude_mod.time, "monotonic", lambda: fake_now)
+
+    _record_answered_ask_flow("req-ttl", CHAT_A)
+    assert recently_answered_ask_flow(CHAT_A) == "req-ttl"
+
+    fake_now += claude_mod.ANSWERED_ASK_FLOW_TTL_S + 1.0
+    assert recently_answered_ask_flow(CHAT_A) is None
+
+    for i in range(claude_mod._ANSWERED_ASK_FLOWS_MAX + 10):
+        _record_answered_ask_flow(f"req-{i}", CHAT_A)
+    assert len(_ANSWERED_ASK_FLOWS) <= claude_mod._ANSWERED_ASK_FLOWS_MAX
+    # Oldest evicted first, newest retained.
+    assert "req-0" not in _ANSWERED_ASK_FLOWS
+    assert f"req-{claude_mod._ANSWERED_ASK_FLOWS_MAX + 9}" in _ANSWERED_ASK_FLOWS
