@@ -18,6 +18,9 @@ _EARLY_TOASTS: dict[str, str] = {
     "other": "Type your reply...",
 }
 
+# #698: shown for a tap that lands after the flow was answered and torn down.
+_ALREADY_ANSWERED_TOAST = "Already answered"
+
 
 async def send_next_ask_question_message(
     transport: Transport,
@@ -69,7 +72,14 @@ class AskQuestionCommand:
 
     @staticmethod
     def early_answer_toast(args_text: str) -> str | None:
+        from ...runners.claude import get_ask_question_flow, recently_answered_ask_flow
+
         action = args_text.split(":", 1)[0].lower() if args_text else ""
+        # #698: the early answer fires before `handle` runs, so this toast is
+        # the only feedback a late tap on an already-answered keyboard gets.
+        # Don't tell the user "Selected" for a tap that will do nothing.
+        if get_ask_question_flow() is None and recently_answered_ask_flow() is not None:
+            return _ALREADY_ANSWERED_TOAST
         return _EARLY_TOASTS.get(action)
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
@@ -78,6 +88,7 @@ class AskQuestionCommand:
             format_question_message,
             get_ask_question_flow,
             get_question_option_buttons,
+            recently_answered_ask_flow,
         )
 
         parts = ctx.args_text.split(":", 1)
@@ -85,6 +96,17 @@ class AskQuestionCommand:
 
         flow = get_ask_question_flow()
         if flow is None:
+            # #698: an option tap that lost the race against the (async, outbox-
+            # queued) keyboard strip is an expected user race, not an unexplained
+            # missing flow — INFO, and say something true.
+            answered = recently_answered_ask_flow()
+            if answered is not None:
+                logger.info(
+                    "ask_question.flow_already_answered",
+                    action=action,
+                    request_id=answered,
+                )
+                return CommandResult(text=_ALREADY_ANSWERED_TOAST, notify=False)
             logger.warning("ask_question.flow_missing", action=action)
             return CommandResult(text="No active question", notify=False)
 
