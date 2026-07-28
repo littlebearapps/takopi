@@ -806,6 +806,61 @@ def _warn_cost_visibility_gap(cost: float, settings: Any, budget_enabled: bool) 
     )
 
 
+def _check_run_cost_outlier(usage: dict[str, Any] | None) -> str | None:
+    """#702: emit ``cost.run_outlier`` for any single run above the threshold,
+    **regardless of whether a ``[cost_budget]`` is configured**, and return the
+    one-line chat notice (or ``None``).
+
+    #658's ``config.cost_visibility_gap`` is a once-per-process config-shape
+    diagnostic and works as designed — but it means a session can spend
+    unboundedly after that single line. ``check_run_budget`` returns early
+    without a configured budget, so ``warn_at_pct`` never evaluates and no
+    alert can fire at any spend level. This is the signal that survives an
+    empty ``[cost_budget]``.
+
+    Fail-open like :func:`_check_cost_budget`: a config read that blows up must
+    never take down the delivery path.
+    """
+    if not usage:
+        return None
+    cost = usage.get("total_cost_usd")
+    if cost is None or cost <= 0:
+        return None
+    try:
+        from .cost_tracker import DEFAULT_RUN_OUTLIER_USD
+        from .settings import load_settings_if_exists
+
+        result = load_settings_if_exists()
+        if result is None:
+            return None
+        settings, _ = result
+        budget_cfg = settings.cost_budget
+        threshold = budget_cfg.warn_run_above_usd
+        if threshold is None:
+            threshold = DEFAULT_RUN_OUTLIER_USD
+        if threshold <= 0 or cost < threshold:
+            return None
+        footer = settings.footer
+        logger.warning(
+            "cost.run_outlier",
+            total_cost_usd=cost,
+            threshold_usd=threshold,
+            budget_configured=budget_cfg.enabled,
+            show_api_cost=footer.show_api_cost,
+            show_subscription_usage=footer.show_subscription_usage,
+        )
+        if not budget_cfg.notify_run_outlier:
+            return None
+        return f"\U0001f4b8 This run cost ${cost:.2f} (over the ${threshold:.2f} alert)"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "cost.run_outlier_check_failed",
+            error=str(exc),
+            error_type=exc.__class__.__name__,
+        )
+        return None
+
+
 def _check_cost_budget(
     usage: dict[str, Any] | None,
 ) -> tuple[str | None, object | None]:
@@ -4051,6 +4106,17 @@ async def handle_message(
                 text=_insert_before_resume(
                     final_rendered.text, f"\n{_cost_alert_text}"
                 ),
+                extra=final_rendered.extra,
+            )
+
+        # #702: the outlier notice is deliberately NOT gated on `_show_cost` —
+        # the operator with the most need to know is the one who turned the
+        # footer off. Suppressed only when a budget alert already surfaced this
+        # run's spend, so a configured budget doesn't produce two lines.
+        _outlier_text = _check_run_cost_outlier(completed.usage)
+        if _outlier_text and _cost_alert_obj is None:
+            final_rendered = RenderedMessage(
+                text=_insert_before_resume(final_rendered.text, f"\n{_outlier_text}"),
                 extra=final_rendered.extra,
             )
 

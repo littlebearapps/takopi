@@ -352,6 +352,16 @@ class CostBudgetSettings(BaseModel):
     max_cost_per_day: float | None = Field(default=None, ge=0)
     warn_at_pct: int = Field(default=70, ge=0, le=100)
     auto_cancel: bool = False
+    # #702: a per-run spend signal that does NOT require the rest of this
+    # block. Everything above is gated on `enabled`, so the one configuration
+    # where a spend alarm matters most — no budget at all — is the one where
+    # it was disabled by construction. Unset falls back to
+    # DEFAULT_RUN_OUTLIER_USD; 0 disables the signal entirely.
+    warn_run_above_usd: float | None = Field(default=None, ge=0)
+    # Opt-out for the one-line chat notice. The log event fires regardless —
+    # the notice is the half that reaches an operator who isn't reading
+    # journalctl, which is exactly the `show_api_cost = false` fleet default.
+    notify_run_outlier: bool = True
 
 
 class LoopSettings(BaseModel):

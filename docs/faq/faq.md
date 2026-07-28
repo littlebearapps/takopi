@@ -100,7 +100,10 @@ max_cost_per_run = 2.00      # USD; warn or auto-cancel if a single run exceeds 
 max_cost_per_day = 10.00     # USD; ditto across a calendar day
 warn_at_pct = 80             # warn when this % of budget is consumed
 auto_cancel_on_exceed = true # cancel the run when the threshold is hit
+warn_run_above_usd = 20.00   # USD; alert on any single expensive run — works even without a budget
 ```
+
+If you set no budget at all, Untether still flags a single run that costs more than `warn_run_above_usd` (default US$20) with a chat line and a `cost.run_outlier` log entry, so a costly session can't pass silently. Set `notify_run_outlier = false` to keep the log entry without the chat line.
 
 `/usage` shows the current run's cost; `/usage debug` shows OAuth token expiry, schema-mismatch counters, and cache freshness — useful when the subscription footer goes silent. `/stats` reports per-engine totals across today, this week, and all time.
 

@@ -256,6 +256,8 @@ Per-chat override: `/verbose on` and `/verbose off` override the config default 
     max_cost_per_day = 10.00
     warn_at_pct = 70
     auto_cancel = false
+    warn_run_above_usd = 20.00
+    notify_run_outlier = true
     ```
 
 | Key | Type | Default | Notes |
@@ -265,8 +267,20 @@ Per-chat override: `/verbose on` and `/verbose off` override the config default 
 | `max_cost_per_day` | float\|null | `null` | Daily cost limit (USD). |
 | `warn_at_pct` | int | `70` | Warning threshold (0–100). |
 | `auto_cancel` | bool | `false` | Auto-cancel runs that exceed the per-run limit. |
+| `warn_run_above_usd` | float\|null | `null` (→ `20.00`) | Per-run spend alert that fires **without** `enabled = true`. `0` disables it. |
+| `notify_run_outlier` | bool | `true` | Show the outlier as a chat line. The `cost.run_outlier` log event fires either way. |
 
 Budget alerts always appear regardless of `[footer]` settings.
+
+!!! tip "The outlier alert works with no budget configured"
+    Everything above `warn_run_above_usd` is gated on `enabled = true`, so a
+    deployment with no `[cost_budget]` block gets no spend signal at any
+    amount — the one configuration where an alarm matters most
+    ([#702](https://github.com/littlebearapps/untether/issues/702)). The
+    per-run outlier alert is deliberately independent: it logs
+    `cost.run_outlier` and adds one chat line for any single run above the
+    threshold (default US$20), whatever `[footer] show_api_cost` is set to.
+    Set `notify_run_outlier = false` to keep the log without the chat line.
 
 !!! note "Cumulative session cost is not capped"
     Sessions can stack many runs via `/continue`, follow-up prompts, or
