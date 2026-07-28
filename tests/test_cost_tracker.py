@@ -215,3 +215,152 @@ def test_cost_visibility_gap_fires_when_enabled_but_capless(monkeypatch) -> None
     assert len(events) == 1
     assert events[0][1]["has_per_run_budget"] is False
     assert events[0][1]["has_per_day_budget"] is False
+
+
+# ---------------------------------------------------------------------------
+# #702: cost.run_outlier — a per-run spend signal that survives no [cost_budget]
+# ---------------------------------------------------------------------------
+
+
+def _outlier_settings(
+    *,
+    enabled: bool = False,
+    warn_run_above_usd: float | None = None,
+    notify_run_outlier: bool = True,
+    show_api_cost: bool = False,
+    show_subscription_usage: bool = True,
+):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        cost_budget=SimpleNamespace(
+            enabled=enabled,
+            warn_run_above_usd=warn_run_above_usd,
+            notify_run_outlier=notify_run_outlier,
+        ),
+        footer=SimpleNamespace(
+            show_api_cost=show_api_cost,
+            show_subscription_usage=show_subscription_usage,
+        ),
+    )
+
+
+def _capture_outlier(monkeypatch, settings):
+    """Capture warnings and pin the settings _check_run_cost_outlier loads."""
+    from untether import runner_bridge
+    from untether import settings as settings_mod
+
+    warnings: list[tuple[str, dict]] = []
+
+    class _Logger:
+        def warning(self, event, **kw):
+            warnings.append((event, kw))
+
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    monkeypatch.setattr(runner_bridge, "logger", _Logger())
+    monkeypatch.setattr(
+        settings_mod, "load_settings_if_exists", lambda: (settings, None)
+    )
+    return warnings
+
+
+def test_run_outlier_fires_without_any_budget(monkeypatch) -> None:
+    """The #702 core claim: `enabled=False` (the fleet default) must no longer
+    mean that no amount of spend can produce a signal."""
+    from untether.runner_bridge import _check_run_cost_outlier
+
+    warnings = _capture_outlier(monkeypatch, _outlier_settings())
+    text = _check_run_cost_outlier({"total_cost_usd": 22.06})
+
+    events = [w for w in warnings if w[0] == "cost.run_outlier"]
+    assert len(events) == 1
+    fields = events[0][1]
+    assert fields["total_cost_usd"] == 22.06
+    assert fields["threshold_usd"] == 20.0
+    assert fields["budget_configured"] is False
+    assert fields["show_api_cost"] is False
+    assert text is not None
+    assert "$22.06" in text
+
+
+def test_run_outlier_silent_below_threshold(monkeypatch) -> None:
+    from untether.runner_bridge import _check_run_cost_outlier
+
+    warnings = _capture_outlier(monkeypatch, _outlier_settings())
+    assert _check_run_cost_outlier({"total_cost_usd": 14.44}) is None
+    assert warnings == []
+
+
+def test_run_outlier_honours_custom_threshold(monkeypatch) -> None:
+    from untether.runner_bridge import _check_run_cost_outlier
+
+    warnings = _capture_outlier(monkeypatch, _outlier_settings(warn_run_above_usd=5.0))
+    assert _check_run_cost_outlier({"total_cost_usd": 9.30}) is not None
+    assert [w for w in warnings if w[0] == "cost.run_outlier"]
+
+
+def test_run_outlier_threshold_zero_disables(monkeypatch) -> None:
+    from untether.runner_bridge import _check_run_cost_outlier
+
+    warnings = _capture_outlier(monkeypatch, _outlier_settings(warn_run_above_usd=0.0))
+    assert _check_run_cost_outlier({"total_cost_usd": 999.0}) is None
+    assert warnings == []
+
+
+def test_run_outlier_notice_opt_out_keeps_the_log(monkeypatch) -> None:
+    """`notify_run_outlier = false` silences the chat line only — the log
+    event is what the issue watcher ingests and must survive."""
+    from untether.runner_bridge import _check_run_cost_outlier
+
+    warnings = _capture_outlier(
+        monkeypatch, _outlier_settings(notify_run_outlier=False)
+    )
+    assert _check_run_cost_outlier({"total_cost_usd": 22.06}) is None
+    assert len([w for w in warnings if w[0] == "cost.run_outlier"]) == 1
+
+
+def test_run_outlier_fires_with_a_budget_configured(monkeypatch) -> None:
+    """A $22 run under a $100 cap trips no budget alert but is still spend
+    worth reporting."""
+    from untether.runner_bridge import _check_run_cost_outlier
+
+    warnings = _capture_outlier(monkeypatch, _outlier_settings(enabled=True))
+    assert _check_run_cost_outlier({"total_cost_usd": 22.06}) is not None
+    events = [w for w in warnings if w[0] == "cost.run_outlier"]
+    assert events[0][1]["budget_configured"] is True
+
+
+def test_run_outlier_ignores_empty_and_zero_usage(monkeypatch) -> None:
+    from untether.runner_bridge import _check_run_cost_outlier
+
+    warnings = _capture_outlier(monkeypatch, _outlier_settings())
+    assert _check_run_cost_outlier(None) is None
+    assert _check_run_cost_outlier({}) is None
+    assert _check_run_cost_outlier({"total_cost_usd": 0.0}) is None
+    assert warnings == []
+
+
+def test_run_outlier_fails_open_on_settings_error(monkeypatch) -> None:
+    from untether import runner_bridge
+    from untether import settings as settings_mod
+    from untether.runner_bridge import _check_run_cost_outlier
+
+    warnings: list[tuple[str, dict]] = []
+
+    class _Logger:
+        def warning(self, event, **kw):
+            warnings.append((event, kw))
+
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    def _boom():
+        raise RuntimeError("toml exploded")
+
+    monkeypatch.setattr(runner_bridge, "logger", _Logger())
+    monkeypatch.setattr(settings_mod, "load_settings_if_exists", _boom)
+
+    assert _check_run_cost_outlier({"total_cost_usd": 99.0}) is None
+    assert [w for w in warnings if w[0] == "cost.run_outlier_check_failed"]

@@ -100,7 +100,10 @@ max_cost_per_run = 2.00      # USD; warn or auto-cancel if a single run exceeds 
 max_cost_per_day = 10.00     # USD; ditto across a calendar day
 warn_at_pct = 80             # warn when this % of budget is consumed
 auto_cancel_on_exceed = true # cancel the run when the threshold is hit
+warn_run_above_usd = 20.00   # USD; alert on any single expensive run — works even without a budget
 ```
+
+If you set no budget at all, Untether still flags a single run that costs more than `warn_run_above_usd` (default US$20) with a chat line and a `cost.run_outlier` log entry, so a costly session can't pass silently. Set `notify_run_outlier = false` to keep the log entry without the chat line.
 
 `/usage` shows the current run's cost; `/usage debug` shows OAuth token expiry, schema-mismatch counters, and cache freshness — useful when the subscription footer goes silent. `/stats` reports per-engine totals across today, this week, and all time.
 
@@ -128,7 +131,7 @@ voice_transcription_language = "en"       # optional ISO-639-1 hint
 voice_transcription_prompt = "Trello, Untether, Claude Code"  # optional vocabulary bias
 ```
 
-Groq's Whisper Large v3 Turbo is fast and cheap; any OpenAI-compatible Whisper endpoint works (including a self-hosted one). If you only ever speak one language, set `voice_transcription_language` (e.g. `"en"`) — without the hint, Whisper-family models occasionally guess the wrong language on very short voice notes. If transcription keeps mangling your project or tool names ("trollo" instead of Trello), set `voice_transcription_prompt` to a short comma-separated list of those names — it biases the decoder toward your domain vocabulary. Keep it to genuinely high-frequency nouns (≤1000 characters, and effect varies by model): an overstuffed prompt can make the model hallucinate those terms on short or silent clips. The API key is `SecretStr`-masked in `repr()` / `str()` / structlog so it never lands in journal or crash output. For safety, `voice_transcription_base_url` is SSRF-checked — a URL that resolves to a private/reserved address (e.g. a self-hosted Whisper on `10.x` or `192.168.x`) is rejected unless you explicitly allow its range with `voice_transcription_url_allowlist = ["10.0.0.0/8"]`. Full setup: [Voice notes](https://untether.littlebearapps.com/how-to/voice-notes/).
+Groq's Whisper Large v3 Turbo is fast and cheap; any OpenAI-compatible Whisper endpoint works (including a self-hosted one). If you only ever speak one language, set `voice_transcription_language` (e.g. `"en"`) — without the hint, Whisper-family models occasionally guess the wrong language on very short voice notes. Untether already biases the decoder toward the terms every user speaks — the engine names (Claude Code, Codex, OpenCode, Gemini, Amp, Pi) plus Untether's own vocabulary. If transcription keeps mangling *your* project or tool names ("trollo" instead of Trello), set `voice_transcription_prompt` to a short comma-separated list of those names; your value replaces the built-in list, so include the engine names you care about too. Keep it to genuinely high-frequency nouns (≤1000 characters, and effect varies by model): an overstuffed prompt can make the model hallucinate those terms on short or silent clips. Set it to `""` to switch the bias off entirely. The API key is `SecretStr`-masked in `repr()` / `str()` / structlog so it never lands in journal or crash output. For safety, `voice_transcription_base_url` is SSRF-checked — a URL that resolves to a private/reserved address (e.g. a self-hosted Whisper on `10.x` or `192.168.x`) is rejected unless you explicitly allow its range with `voice_transcription_url_allowlist = ["10.0.0.0/8"]`. Full setup: [Voice notes](https://untether.littlebearapps.com/how-to/voice-notes/).
 
 ## Can agents send files back to me automatically?
 

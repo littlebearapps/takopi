@@ -83,6 +83,7 @@ class AskQuestionCommand:
         return _EARLY_TOASTS.get(action)
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
+        from ...runner_bridge import advance_ask_action_model, clear_ask_action_model
         from ...runners.claude import (
             answer_ask_question_with_options,
             format_question_message,
@@ -125,6 +126,22 @@ class AskQuestionCommand:
                     text="That option is no longer valid.", notify=True
                 )
 
+            # #710: read the current question only after bounds-checking it.
+            # The index is incremented below and separated from the flow
+            # teardown by an `await`, so two callbacks racing that window left
+            # the second one indexing past the end — an ERROR-level traceback
+            # (`callback.failed`, a signature the issue watcher auto-files on)
+            # plus a failure toast, for an action that in fact succeeded.
+            # Treat out-of-range as the already-answered case so both
+            # orderings of a double-tap produce the same truthful outcome.
+            if flow.current_index >= len(flow.questions):
+                logger.info(
+                    "ask_question.flow_already_answered",
+                    action=action,
+                    request_id=flow.request_id,
+                )
+                return CommandResult(text=_ALREADY_ANSWERED_TOAST, notify=False)
+
             # Get the selected option label
             current_q = flow.questions[flow.current_index]
             options = current_q.get("options", [])
@@ -147,6 +164,19 @@ class AskQuestionCommand:
                 # Render next question by editing the message
                 msg_text = format_question_message(flow)
                 buttons = get_question_option_buttons(flow)
+                # #709: advance the MODEL first. The edit below is what the
+                # user sees immediately; without this the next 30s heartbeat
+                # re-renders from the tracker's intercept-time title and
+                # keyboard and clobbers it, showing Q1's text and Q1's option
+                # labels while Q2 is outstanding. Updating the model makes
+                # that re-render a no-op instead of a regression.
+                if not advance_ask_action_model(
+                    flow.request_id, title=msg_text, buttons=buttons
+                ):
+                    logger.debug(
+                        "ask_question.model_not_tracked",
+                        request_id=flow.request_id,
+                    )
                 msg = RenderedMessage(
                     text=msg_text,
                     extra={
@@ -157,8 +187,17 @@ class AskQuestionCommand:
                 await ctx.executor.edit(ctx.message, msg)
                 return None
             else:
-                # All questions answered — send structured response
-                success = await answer_ask_question_with_options(flow.request_id)
+                # All questions answered — send structured response.
+                # #709: drop the keyboard from the MODEL before the await, so
+                # a heartbeat landing mid-teardown can't repaint the answered
+                # question's buttons. This is the model-side half of the #550
+                # keyboard strip below, and it narrows #698's race window.
+                request_id = flow.request_id
+                advance_ask_action_model(
+                    request_id, title="✅ All questions answered", buttons=None
+                )
+                success = await answer_ask_question_with_options(request_id)
+                clear_ask_action_model(request_id)
                 if success:
                     # Strip the inline keyboard from the final question message
                     # so the user can no longer click buttons that would fire

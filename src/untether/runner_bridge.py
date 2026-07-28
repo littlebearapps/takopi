@@ -15,7 +15,7 @@ import anyio
 from .context import RunContext
 from .error_hints import get_error_hint as _get_error_hint
 from .logging import bind_run_context, get_logger
-from .markdown import format_meta_line, render_event_cli
+from .markdown import _short_model_name, format_meta_line, render_event_cli
 from .model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent, UntetherEvent
 from .presenter import Presenter
 from .progress import ProgressTracker
@@ -55,6 +55,33 @@ class _StuckAfterToolResultState:
 # `@modelcontextprotocol/*` stdio bridges share the same failure mode.
 _MCP_ADAPTER_CMDLINE_HINTS = ("mcp-remote", "@modelcontextprotocol")
 
+
+def _model_log_fields(meta: dict[str, Any] | None) -> dict[str, object]:
+    """#695: resolved model as loggable fields, or ``{}`` when unknown.
+
+    The model lives only in ``StartedEvent.meta``, which until now was
+    consumed for rendering and never logged — so a footer regression like
+    #688 (``claude-opus-5[1m]`` shortening to a bare ``opus``, silently
+    dropping the 1M-context marker) was invisible to log-side auditing and
+    to the log-only ``untether-issue-watcher``.
+
+    Both halves are logged deliberately: ``model`` is the raw ID from the
+    engine, ``model_display`` is the *same string the footer renders*, taken
+    from ``_short_model_name`` rather than re-derived, so the pair makes a
+    shortener regression self-evident from logs alone.
+
+    Returns an empty dict rather than ``model=None`` when meta carries no
+    model — some engines ship it late (pi sends the model from
+    ``message_end`` via a supplementary ``StartedEvent``, per
+    ``.claude/rules/runner-development.md``), and an absent key reads as
+    "not reported" where ``None`` reads as "reported as nothing".
+    """
+    model = (meta or {}).get("model")
+    if not isinstance(model, str) or not model:
+        return {}
+    return {"model": model, "model_display": _short_model_name(model)}
+
+
 # ---------------------------------------------------------------------------
 # Ephemeral message registry
 # ---------------------------------------------------------------------------
@@ -83,6 +110,63 @@ def register_ephemeral_message(
     key = (channel_id, anchor_message_id)
     _EPHEMERAL_MSGS.setdefault(key, []).append(ref)
     _EPHEMERAL_MSGS_TS[key] = _time.monotonic()
+
+
+# ---------------------------------------------------------------------------
+# #709: AskUserQuestion tracked-action registry
+# ---------------------------------------------------------------------------
+# Two writers own the progress message and only one of them had state. The
+# ``aq`` callback handler advances a multi-question flow by editing the
+# message directly, but the ProgressTracker still held the AskUserQuestion
+# control action with its INTERCEPT-time title and keyboard — so the next
+# heartbeat re-render regenerated the message from that unchanged model and
+# clobbered the edit, showing Q1's text and Q1's option labels while Q2 was
+# outstanding. This registry lets the handler advance the model too.
+#
+# Keyed by request_id (which the flow already carries). Same TTL sweep as the
+# other run-scoped registries above.
+
+_ASK_ACTION_MODEL: dict[str, tuple[ProgressTracker, str]] = {}
+_ASK_ACTION_MODEL_TS: dict[str, float] = {}
+
+
+def register_ask_action_model(
+    request_id: str, tracker: ProgressTracker, action_id: str
+) -> None:
+    """Record which tracked action renders *request_id*'s question."""
+    import time as _time
+
+    _ASK_ACTION_MODEL[request_id] = (tracker, action_id)
+    _ASK_ACTION_MODEL_TS[request_id] = _time.monotonic()
+
+
+def advance_ask_action_model(
+    request_id: str,
+    *,
+    title: str,
+    buttons: list[list[dict[str, str]]] | None,
+) -> bool:
+    """Point the tracked action at the flow's CURRENT question.
+
+    ``buttons=None`` clears the keyboard from the model — used when the flow
+    is answered, so the renderer's newest-first keyboard scan (#683) stops
+    finding this action instead of the handler racing an edit against it.
+    """
+    entry = _ASK_ACTION_MODEL.get(request_id)
+    if entry is None:
+        return False
+    tracker, action_id = entry
+    detail = dict(tracker.action_detail(action_id) or {})
+    if buttons is None:
+        detail.pop("inline_keyboard", None)
+    else:
+        detail["inline_keyboard"] = {"buttons": buttons}
+    return tracker.update_action(action_id, title=title, detail=detail)
+
+
+def clear_ask_action_model(request_id: str) -> None:
+    _ASK_ACTION_MODEL.pop(request_id, None)
+    _ASK_ACTION_MODEL_TS.pop(request_id, None)
 
 
 # Outline message cleanup registry.
@@ -149,6 +233,11 @@ def sweep_stale_registries(now: float | None = None) -> int:
         if now - ts > _REGISTRY_TTL_SECONDS:
             _OUTLINE_REGISTRY.pop(sid, None)
             _OUTLINE_REGISTRY_TS.pop(sid, None)
+            pruned += 1
+    for rid, ts in list(_ASK_ACTION_MODEL_TS.items()):
+        if now - ts > _REGISTRY_TTL_SECONDS:
+            _ASK_ACTION_MODEL.pop(rid, None)
+            _ASK_ACTION_MODEL_TS.pop(rid, None)
             pruned += 1
     if pruned:
         logger.info("runner_bridge.registries_swept", pruned=pruned)
@@ -777,6 +866,61 @@ def _warn_cost_visibility_gap(cost: float, settings: Any, budget_enabled: bool) 
         show_api_cost=footer.show_api_cost,
         show_subscription_usage=footer.show_subscription_usage,
     )
+
+
+def _check_run_cost_outlier(usage: dict[str, Any] | None) -> str | None:
+    """#702: emit ``cost.run_outlier`` for any single run above the threshold,
+    **regardless of whether a ``[cost_budget]`` is configured**, and return the
+    one-line chat notice (or ``None``).
+
+    #658's ``config.cost_visibility_gap`` is a once-per-process config-shape
+    diagnostic and works as designed — but it means a session can spend
+    unboundedly after that single line. ``check_run_budget`` returns early
+    without a configured budget, so ``warn_at_pct`` never evaluates and no
+    alert can fire at any spend level. This is the signal that survives an
+    empty ``[cost_budget]``.
+
+    Fail-open like :func:`_check_cost_budget`: a config read that blows up must
+    never take down the delivery path.
+    """
+    if not usage:
+        return None
+    cost = usage.get("total_cost_usd")
+    if cost is None or cost <= 0:
+        return None
+    try:
+        from .cost_tracker import DEFAULT_RUN_OUTLIER_USD
+        from .settings import load_settings_if_exists
+
+        result = load_settings_if_exists()
+        if result is None:
+            return None
+        settings, _ = result
+        budget_cfg = settings.cost_budget
+        threshold = budget_cfg.warn_run_above_usd
+        if threshold is None:
+            threshold = DEFAULT_RUN_OUTLIER_USD
+        if threshold <= 0 or cost < threshold:
+            return None
+        footer = settings.footer
+        logger.warning(
+            "cost.run_outlier",
+            total_cost_usd=cost,
+            threshold_usd=threshold,
+            budget_configured=budget_cfg.enabled,
+            show_api_cost=footer.show_api_cost,
+            show_subscription_usage=footer.show_subscription_usage,
+        )
+        if not budget_cfg.notify_run_outlier:
+            return None
+        return f"\U0001f4b8 This run cost ${cost:.2f} (over the ${threshold:.2f} alert)"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "cost.run_outlier_check_failed",
+            error=str(exc),
+            error_type=exc.__class__.__name__,
+        )
+        return None
 
 
 def _check_cost_budget(
@@ -2866,6 +3010,14 @@ class ProgressEdits:
     async def on_event(self, evt: UntetherEvent) -> None:
         if not self.tracker.note_event(evt):
             return
+        # #709: an AskUserQuestion control action is advanced by the `aq`
+        # callback handler, not by further engine events — bind it to this
+        # tracker so the handler can move the MODEL and the heartbeat
+        # re-render agrees with what the user was just shown.
+        if isinstance(evt, ActionEvent) and evt.action.detail.get("ask_flow"):
+            _ask_rid = evt.action.detail.get("request_id")
+            if isinstance(_ask_rid, str) and _ask_rid:
+                register_ask_action_model(_ask_rid, self.tracker, str(evt.action.id))
         if self.progress_ref is None:
             return
         now = self.clock()
@@ -3261,6 +3413,9 @@ async def run_runner_with_cancel(
         cancelled=outcome.cancelled,
         ok=outcome.completed.ok if outcome.completed else None,
         stall_suppressions=suppression_summary,
+        # #695: both events carry the model so a single grep over either
+        # answers "which model ran this session?".
+        **_model_log_fields(edits.tracker.meta),
     )
     if event_count == 0 and not outcome.cancelled:
         logger.warning(
@@ -3943,6 +4098,10 @@ async def handle_message(
             action_count=progress_tracker.action_count,
             resume=resume_value,
             **usage_log,
+            # #695: per-run model attribution. Also gives the cost fields
+            # above something to attribute to — `total_cost_usd` was
+            # previously logged with no record of which model produced it.
+            **_model_log_fields(progress_tracker.meta),
         )
         # Record session stats for /stats command
         from .session_stats import record_run as _record_stats_run
@@ -4017,6 +4176,17 @@ async def handle_message(
                 text=_insert_before_resume(
                     final_rendered.text, f"\n{_cost_alert_text}"
                 ),
+                extra=final_rendered.extra,
+            )
+
+        # #702: the outlier notice is deliberately NOT gated on `_show_cost` —
+        # the operator with the most need to know is the one who turned the
+        # footer off. Suppressed only when a budget alert already surfaced this
+        # run's spend, so a configured budget doesn't produce two lines.
+        _outlier_text = _check_run_cost_outlier(completed.usage)
+        if _outlier_text and _cost_alert_obj is None:
+            final_rendered = RenderedMessage(
+                text=_insert_before_resume(final_rendered.text, f"\n{_outlier_text}"),
                 extra=final_rendered.extra,
             )
 

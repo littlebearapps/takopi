@@ -319,7 +319,9 @@ def test_voice_transcription_prompt_stripped(tmp_path: Path) -> None:
 
 
 def test_voice_transcription_prompt_default_none(tmp_path: Path) -> None:
-    """#691: omitted → None → the API parameter is omitted entirely."""
+    """#691/#703: omitted → None at the settings layer. None now MEANS
+    "use the shipped default" — the resolution lives at the transport
+    boundary (voice.resolve_transcription_prompt), not here."""
     config_path = tmp_path / "untether.toml"
     config_path.write_text(
         '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n'
@@ -328,6 +330,23 @@ def test_voice_transcription_prompt_default_none(tmp_path: Path) -> None:
     )
     settings, _ = load_settings(config_path)
     assert settings.transports.telegram.voice_transcription_prompt is None
+
+
+def test_voice_transcription_prompt_empty_preserved_as_optout(tmp_path: Path) -> None:
+    """#703: an explicitly-empty value must survive validation as "" so it
+    stays distinguishable from unset — collapsing it to None would make the
+    opt-out silently re-enable the shipped default."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "tok"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n"
+        'voice_transcription_prompt = "   "\n',
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert settings.transports.telegram.voice_transcription_prompt == ""
 
 
 def test_voice_transcription_prompt_rejects_over_1000_chars(tmp_path: Path) -> None:

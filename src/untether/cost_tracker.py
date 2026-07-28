@@ -18,6 +18,11 @@ logger = get_logger(__name__)
 _daily_cost: tuple[str, float] = ("", 0.0)
 _daily_cost_lock = threading.Lock()
 
+# #702: fallback threshold for the budget-independent per-run spend signal.
+# Matches the outlier threshold `/monitor` already applies when auditing spend,
+# so the in-product signal and the audit agree on what counts as an outlier.
+DEFAULT_RUN_OUTLIER_USD = 20.0
+
 
 @dataclass(slots=True)
 class CostBudget:
