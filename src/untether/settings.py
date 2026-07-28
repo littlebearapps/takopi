@@ -167,11 +167,17 @@ class TelegramTransportSettings(BaseModel):
     # utterances ('Continue' → '계속').
     voice_transcription_language: NonEmptyStr | None = None
     # #691: optional vocabulary-bias prompt forwarded to the STT API — steers
-    # the decoder toward domain proper nouns ('trollo' → Trello). Unset =
-    # omit the parameter entirely (provider default behaviour). Effect is
+    # the decoder toward domain proper nouns ('trollo' → Trello). Effect is
     # model-dependent; keep it to genuinely high-frequency nouns — an
     # overstuffed prompt can induce hallucinated terms on short clips.
-    voice_transcription_prompt: NonEmptyStr | None = None
+    #
+    # #703: unset now resolves to DEFAULT_VOICE_TRANSCRIPTION_PROMPT (the
+    # product-generic engine/tool vocabulary) rather than omitting the
+    # parameter — #691 shipped inert on every fleet host because no TOML set
+    # it. Explicit `""` disables, matching how `[preamble] text = ""` works;
+    # that's why this is `str | None` and not `NonEmptyStr | None` — the
+    # empty string has to survive validation to mean anything.
+    voice_transcription_prompt: str | None = None
     voice_show_transcription: bool = True
     # #381: optional SSRF allowlist (CIDR / bare-IP strings) for
     # voice_transcription_base_url — lets operators opt in to private endpoints
@@ -234,15 +240,22 @@ class TelegramTransportSettings(BaseModel):
     @field_validator("voice_transcription_prompt", mode="after")
     @classmethod
     def _validate_voice_prompt(cls, v: str | None) -> str | None:
-        """#691: strip; empty → None (omit the API parameter). Reject rather
-        than silently truncate past 1000 chars — provider prompt windows are
-        token-capped (~224 for Whisper) and invisible truncation would change
-        the configured bias without telling the operator."""
+        """#691: strip; reject rather than silently truncate past 1000 chars —
+        provider prompt windows are token-capped (~224 for Whisper) and
+        invisible truncation would change the configured bias without telling
+        the operator.
+
+        #703: an explicitly-configured empty string is PRESERVED as ``""``
+        (the opt-out sentinel) instead of collapsing to ``None``. ``None`` now
+        means "unset → use the shipped default", so the two must stay
+        distinguishable. Resolution happens in
+        :func:`untether.telegram.voice.resolve_transcription_prompt`.
+        """
         if v is None:
             return None
         prompt = v.strip()
         if not prompt:
-            return None
+            return ""
         if len(prompt) > 1000:
             raise ValueError(
                 "voice_transcription_prompt must be ≤1000 characters "

@@ -437,6 +437,68 @@ async def test_transcribe_voice_passes_vocabulary_prompt() -> None:
     assert transcriber2.prompts == [None]
 
 
+def test_resolve_transcription_prompt_unset_uses_shipped_default() -> None:
+    """#703: #691 was inert on every fleet host because no TOML set the key.
+    Unset must now resolve to the shipped vocabulary."""
+    from untether.telegram.voice import (
+        DEFAULT_VOICE_TRANSCRIPTION_PROMPT,
+        resolve_transcription_prompt,
+    )
+
+    assert resolve_transcription_prompt(None) == DEFAULT_VOICE_TRANSCRIPTION_PROMPT
+    # Engine names are the words carrying a spoken instruction's referent.
+    for term in ("Untether", "Codex", "OpenCode", "Claude Code"):
+        assert term in DEFAULT_VOICE_TRANSCRIPTION_PROMPT
+    # Product-generic only — no deployment-specific nouns in a PyPI wheel.
+    for term in ("lba-1", "nsd", "channelo", "Trello"):
+        assert term not in DEFAULT_VOICE_TRANSCRIPTION_PROMPT
+    # Well inside the ~224-token Whisper prompt window.
+    assert len(DEFAULT_VOICE_TRANSCRIPTION_PROMPT) <= 1000
+
+
+def test_resolve_transcription_prompt_empty_string_opts_out() -> None:
+    """#703: explicit "" disables the bias entirely — same shape as
+    `[preamble] text = ""`. This is why the setting is str|None, not
+    NonEmptyStr|None."""
+    from untether.telegram.voice import resolve_transcription_prompt
+
+    assert resolve_transcription_prompt("") is None
+
+
+def test_resolve_transcription_prompt_override_replaces_default() -> None:
+    """An operator value REPLACES the default rather than merging — their
+    token budget stays theirs to spend."""
+    from untether.telegram.voice import resolve_transcription_prompt
+
+    assert resolve_transcription_prompt("Trello, lba-1") == "Trello, lba-1"
+
+
+@pytest.mark.anyio
+async def test_transcribe_voice_default_prompt_reaches_transcriber() -> None:
+    """#703 end-to-end at the transport boundary: an unconfigured deployment
+    now sends the vocabulary bias instead of omitting the parameter."""
+    from untether.telegram.voice import (
+        DEFAULT_VOICE_TRANSCRIPTION_PROMPT,
+        resolve_transcription_prompt,
+    )
+
+    async def reply(**kwargs) -> None:
+        return None
+
+    transcriber = _Transcriber(result="Deploy to TestPyPI")
+    bot = _Bot(file_info=File(file_path="voice.ogg"), audio=b"ok")
+    await transcribe_voice(
+        bot=bot,
+        msg=_voice_message(file_size=2),
+        enabled=True,
+        model="whisper-1",
+        reply=reply,
+        transcriber=transcriber,
+        prompt=resolve_transcription_prompt(None),
+    )
+    assert transcriber.prompts == [DEFAULT_VOICE_TRANSCRIPTION_PROMPT]
+
+
 @pytest.mark.anyio
 async def test_openai_transcriber_omits_unset_prompt_kwarg() -> None:
     """#691: some OpenAI-compatible endpoints 400 on unknown multipart

@@ -74,7 +74,7 @@ from .types import (
     TelegramIncomingMessage,
     TelegramIncomingUpdate,
 )
-from .voice import transcribe_voice
+from .voice import resolve_transcription_prompt, transcribe_voice
 
 logger = get_logger(__name__)
 
@@ -2516,7 +2516,11 @@ async def run_main_loop(
                             cfg.voice_transcription_url_allowlist
                         ),
                         language=cfg.voice_transcription_language,
-                        prompt=cfg.voice_transcription_prompt,
+                        # #703: unset → the shipped vocabulary default;
+                        # explicit "" → omit the parameter.
+                        prompt=resolve_transcription_prompt(
+                            cfg.voice_transcription_prompt
+                        ),
                     )
                     if text is None:
                         return

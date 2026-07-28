@@ -74,8 +74,21 @@ tool names ([#691](https://github.com/littlebearapps/untether/issues/691)). It i
 passed as the transcription `prompt` parameter (vocabulary/context bias). Keep it
 to genuinely high-frequency nouns — provider prompt windows are token-capped
 (~224 tokens for Whisper), the effect is model-dependent, and an overstuffed
-prompt can induce hallucinated terms on short or silent clips. Unset, the
-parameter is omitted entirely.
+prompt can induce hallucinated terms on short or silent clips.
+
+Since v0.35.5 the key is **not** inert when unset
+([#703](https://github.com/littlebearapps/untether/issues/703)): Untether ships a
+product-generic default covering the terms every user speaks —
+
+```
+Untether, Telegram, Claude Code, Codex, OpenCode, Gemini, Amp, Pi, MCP, CLI, repo, changelog, PyPI
+```
+
+Deployment-specific nouns (your project names, hostnames, third-party tools) are
+deliberately **not** in the default — add them yourself. Setting the key
+**replaces** the default rather than extending it, so include the engine names
+you care about in your own value. Set it to an empty string (`""`) to disable the
+bias entirely and omit the parameter, the same way `[preamble] text = ""` works.
 
 ### Trigger mode (mentions-only)
 
