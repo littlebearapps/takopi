@@ -247,7 +247,8 @@ def _outlier_settings(
 
 def _capture_outlier(monkeypatch, settings):
     """Capture warnings and pin the settings _check_run_cost_outlier loads."""
-    from untether import runner_bridge, settings as settings_mod
+    from untether import runner_bridge
+    from untether import settings as settings_mod
 
     warnings: list[tuple[str, dict]] = []
 
@@ -342,7 +343,8 @@ def test_run_outlier_ignores_empty_and_zero_usage(monkeypatch) -> None:
 
 
 def test_run_outlier_fails_open_on_settings_error(monkeypatch) -> None:
-    from untether import runner_bridge, settings as settings_mod
+    from untether import runner_bridge
+    from untether import settings as settings_mod
     from untether.runner_bridge import _check_run_cost_outlier
 
     warnings: list[tuple[str, dict]] = []

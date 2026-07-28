@@ -1334,10 +1334,10 @@ async def test_710_concurrent_final_taps_do_not_raise(monkeypatch) -> None:
         )
 
     async with anyio.create_task_group() as tg:
-        tg.start_soon(_tap, "aq:opt:0".split(":", 1)[1])
-        await anyio.sleep(0)  # let A reach the await
+        tg.start_soon(_tap, "opt:0")
+        await anyio.lowlevel.checkpoint()  # let A reach the await
         tg.start_soon(_tap, "opt:1")
-        await anyio.sleep(0)
+        await anyio.lowlevel.checkpoint()
         gate.set()
 
     texts = [getattr(r, "text", None) for r in results]
