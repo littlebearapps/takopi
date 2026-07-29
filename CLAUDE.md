@@ -191,14 +191,14 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 
 ## Tests
 
-3127 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
+3133 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
 
 Key test files:
 
 - `test_claude_control.py` — 100 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, outline gate (#570 retired the progressive cooldown), auto permission mode, diff_preview plan bypass
 - `test_callback_dispatch.py` — 26 tests: callback parsing, dispatch toast/ephemeral behaviour, early answering
 - `test_exec_bridge.py` — 270 tests: ephemeral notification cleanup, approval push notifications, progressive stall warnings, stall diagnostics, stall auto-cancel with CPU-active suppression (sleeping-process aware), tool-active repeat suppression, approval-aware stall threshold, MCP tool stall threshold, frozen ring buffer hung escalation, session summary, PID/stream threading, auto-continue detection, signal death suppression, Type-A stream-idle auto-retry (#572), empty-resume quarantine-and-fresh recovery, resume divert/clear, empty-result diagnostics
-- `test_ask_user_question.py` — 46 tests: AskUserQuestion control request handling, question extraction, pending request registry, answer routing, option button rendering, multi-question flows, structured answer responses, ask mode toggle auto-deny, late-tap already-answered memo (TTL + entry cap + channel scoping, #698), tracked-action advance so the progress heartbeat can't re-render Q1 over Q2 (#709), concurrent final-tap bounds check (#710)
+- `test_ask_user_question.py` — 52 tests: AskUserQuestion control request handling, question extraction, pending request registry, answer routing, option button rendering, multi-question flows, structured answer responses, ask mode toggle auto-deny, late-tap already-answered memo (TTL + entry cap + channel scoping, #698), tracked-action advance so the progress heartbeat can't re-render Q1 over Q2 (#709), concurrent final-tap bounds check (#710), HTML escaping at the `parse_mode="HTML"` boundary with a raw-by-default guard against double-escaping the markdown-rendered model title (#713)
 - `test_diff_preview.py` — 14 tests: Edit diff display, Write content preview, Bash command display, line/char truncation
 - `test_cost_tracker.py` — 25 tests: cost accumulation, per-run/daily budget thresholds, warning levels, daily reset, auto-cancel flag, one-shot `config.cost_visibility_gap` warning (#658), budget-independent `cost.run_outlier` per-run spend signal with configurable threshold and notice opt-out (#702)
 - `test_export_command.py` — 16 tests: session event recording, markdown/JSON export formatting, usage integration, session trimming

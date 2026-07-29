@@ -8,6 +8,7 @@ to prevent deadlock when keeping stdin open for control responses.
 from __future__ import annotations
 
 import contextlib
+import html
 import json
 import os
 import pty
@@ -5281,10 +5282,38 @@ async def answer_ask_question_with_options(request_id: str) -> bool:
     return await send_claude_control_response(request_id, approved=True)
 
 
-def format_question_message(flow: AskQuestionState) -> str:
-    """Format the current question in a flow as a display string."""
+def format_question_message(
+    flow: AskQuestionState, *, escape_html: bool = False
+) -> str:
+    """Format the current question in a flow as a display string.
+
+    The question text is agent-authored free text and routinely contains
+    angle brackets — a question about an inline ``<svg>``, a generic like
+    ``list<T>``, a shell redirect. It is consumed under two different and
+    incompatible rendering contracts:
+
+    * ``escape_html=True`` — the caller builds a ``RenderedMessage`` carrying
+      ``parse_mode="HTML"``. Telegram parses the whole body as HTML and
+      accepts only a small tag whitelist, so an unescaped ``<svg>`` fails the
+      **entire** request with ``400 Bad Request: can't parse entities:
+      Unsupported start tag``. Because the ask-flow messages carry the option
+      keyboard, losing that edit leaves the run unanswerable from Telegram
+      (#713 — same class as the #199 fix in ``commands/auth.py``).
+    * the default, ``escape_html=False`` — the caller stores the string as a
+      progress action title (``advance_ask_action_model``, #709), which is
+      rendered via ``render_markdown`` where markdown-it (``html: False``)
+      already neutralises tags. Escaping here as well would double-escape and
+      show the user a literal ``&lt;svg&gt;``.
+
+    Only the agent's text is escaped; the bot-authored ``❓ Question N of M:``
+    prefix contains no HTML-special characters. ``quote=False`` because
+    quotation marks are legal in HTML text content — escaping them would
+    surface a literal ``&quot;`` for a merely quoted question.
+    """
     q = flow.questions[flow.current_index]
     question_text = q.get("question", "")
+    if escape_html:
+        question_text = html.escape(question_text, quote=False)
     total = len(flow.questions)
     if total > 1:
         return f"❓ Question {flow.current_index + 1} of {total}: {question_text}"

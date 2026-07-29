@@ -493,6 +493,79 @@ def test_format_question_message_multi() -> None:
     assert "2 of 2" in format_question_message(flow)
 
 
+# ---------------------------------------------------------------------------
+# #713 — HTML escaping at the parse_mode="HTML" boundary
+# ---------------------------------------------------------------------------
+
+
+def test_format_question_message_html_escapes_agent_tags() -> None:
+    """An agent-authored tag must not reach Telegram's HTML parser raw.
+
+    Live repro (nsd 0.35.5rc4): a question containing a literal ``<svg>``
+    produced ``400 Bad Request: can't parse entities: Unsupported start tag
+    "svg"``, which dropped a keyboard-carrying edit and left the run
+    unanswerable from Telegram.
+    """
+    flow = AskQuestionState(
+        request_id="req-713",
+        channel_id=CHAT_A,
+        questions=[{"question": "Guard a blank line inside an inline `<svg>`?"}],
+    )
+    msg = format_question_message(flow, escape_html=True)
+    assert "&lt;svg&gt;" in msg
+    assert "<svg>" not in msg
+
+
+def test_format_question_message_html_escapes_ampersand() -> None:
+    """A bare ``&`` is equally fatal to Telegram's HTML parser."""
+    flow = AskQuestionState(
+        request_id="req-713",
+        channel_id=CHAT_A,
+        questions=[{"question": "Ship A & B, or just <b>A</b>?"}],
+    )
+    msg = format_question_message(flow, escape_html=True)
+    assert "&amp;" in msg
+    assert "&lt;b&gt;A&lt;/b&gt;" in msg
+    # Quotes are legal in HTML text content — escaping them would surface
+    # literal &quot; to the user, so they are deliberately left alone.
+    assert "&quot;" not in format_question_message(
+        AskQuestionState(
+            request_id="req-713b",
+            channel_id=CHAT_A,
+            questions=[{"question": 'Use "double" quotes?'}],
+        ),
+        escape_html=True,
+    )
+
+
+def test_format_question_message_default_stays_raw() -> None:
+    """The default must NOT escape — it feeds the markdown/entities path.
+
+    ``advance_ask_action_model`` stores this string as the progress action
+    title, which is rendered via ``render_markdown`` (markdown-it with
+    ``html: False`` already neutralises tags). Escaping here too would
+    double-escape and show the user a literal ``&lt;svg&gt;``.
+    """
+    flow = AskQuestionState(
+        request_id="req-713",
+        channel_id=CHAT_A,
+        questions=[{"question": "Guard an inline `<svg>`?"}],
+    )
+    assert "<svg>" in format_question_message(flow)
+    assert "&lt;" not in format_question_message(flow)
+
+
+def test_format_question_message_html_keeps_multi_question_prefix() -> None:
+    """Escaping applies to agent text only, never the bot-authored prefix."""
+    flow = AskQuestionState(
+        request_id="req-713",
+        channel_id=CHAT_A,
+        questions=[{"question": "<one>"}, {"question": "<two>"}],
+    )
+    msg = format_question_message(flow, escape_html=True)
+    assert msg == "❓ Question 1 of 2: &lt;one&gt;"
+
+
 def test_get_question_option_buttons() -> None:
     flow = AskQuestionState(
         request_id="req-1",
@@ -1373,3 +1446,77 @@ async def test_710_out_of_range_index_reports_already_answered() -> None:
     assert len(already) == 1
     assert already[0]["log_level"] == "info"
     assert already[0]["request_id"] == "req-710-b"
+
+
+# ---------------------------------------------------------------------------
+# #713 — the two call sites must escape, and only at the HTML boundary
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_713_in_place_edit_escapes_but_model_title_stays_raw() -> None:
+    """The in-place Q2 edit is sent with ``parse_mode="HTML"``, so its text
+    must be escaped — while the SAME string stored on the tracked action
+    (#709) must stay raw, because that one renders through
+    ``render_markdown``. Escaping both would show a literal ``&lt;svg&gt;``.
+    """
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow = AskQuestionState(
+        request_id="req-713-a",
+        channel_id=CHAT_A,
+        questions=[
+            {"question": "Q1?", "options": [{"label": "A"}, {"label": "B"}]},
+            {
+                "question": "Guard a blank line inside an inline `<svg>`?",
+                "options": [{"label": "Yes"}, {"label": "No"}],
+            },
+        ],
+    )
+    _ASK_QUESTION_FLOWS[flow.request_id] = flow
+    tracker = _tracked_ask_action(
+        flow.request_id,
+        title="❓ Question 1 of 2: Q1?",
+        buttons=[[{"text": "A", "callback_data": "aq:opt:0"}]],
+    )
+
+    ctx = _make_command_ctx("opt:0")
+    await cmd_mod.AskQuestionCommand().handle(ctx)
+
+    # The wire message: escaped, because parse_mode is HTML.
+    assert ctx.executor.edit.await_count == 1
+    sent = ctx.executor.edit.await_args[0][1]
+    assert sent.extra["parse_mode"] == "HTML"
+    assert "&lt;svg&gt;" in sent.text
+    assert "<svg>" not in sent.text
+
+    # The progress model: raw, because it renders through markdown.
+    assert "<svg>" in tracker.snapshot().actions[0].action.title
+
+
+@pytest.mark.anyio
+async def test_713_send_next_question_escapes() -> None:
+    """The "Other → typed reply" continuation path sends (not edits) the next
+    question under ``parse_mode="HTML"`` and needs the same escaping."""
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow = AskQuestionState(
+        request_id="req-713-b",
+        channel_id=CHAT_A,
+        questions=[{"question": "Ship <b>A</b> & B?", "options": [{"label": "Yes"}]}],
+    )
+    transport = AsyncMock()
+
+    await cmd_mod.send_next_ask_question_message(
+        transport,
+        chat_id=CHAT_A,
+        user_msg_id=1,
+        thread_id=None,
+        flow=flow,
+    )
+
+    assert transport.send.await_count == 1
+    message = transport.send.await_args.kwargs["message"]
+    assert message.extra["parse_mode"] == "HTML"
+    assert "&lt;b&gt;A&lt;/b&gt;" in message.text
+    assert "&amp;" in message.text
