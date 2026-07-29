@@ -44,7 +44,9 @@ async def send_next_ask_question_message(
     """
     from ...runners.claude import format_question_message, get_question_option_buttons
 
-    msg_text = format_question_message(flow)
+    # #713: this message is sent with parse_mode="HTML", so the agent-authored
+    # question text must be escaped or a stray `<svg>` fails the whole send.
+    msg_text = format_question_message(flow, escape_html=True)
     buttons = get_question_option_buttons(flow)
     await transport.send(
         channel_id=chat_id,
@@ -161,8 +163,15 @@ class AskQuestionCommand:
 
             # Check if there are more questions
             if flow.current_index < len(flow.questions):
-                # Render next question by editing the message
+                # Render next question by editing the message.
+                # #713: the same question needs two different encodings. The
+                # model title is rendered through render_markdown (which
+                # escapes tags itself), so it takes the RAW text; the edit
+                # below is parse_mode="HTML", so it takes the escaped text.
+                # Passing the escaped string to both would double-escape and
+                # show the user a literal `&lt;svg&gt;` on the next heartbeat.
                 msg_text = format_question_message(flow)
+                msg_html = format_question_message(flow, escape_html=True)
                 buttons = get_question_option_buttons(flow)
                 # #709: advance the MODEL first. The edit below is what the
                 # user sees immediately; without this the next 30s heartbeat
@@ -178,7 +187,7 @@ class AskQuestionCommand:
                         request_id=flow.request_id,
                     )
                 msg = RenderedMessage(
-                    text=msg_text,
+                    text=msg_html,
                     extra={
                         "parse_mode": "HTML",
                         "reply_markup": {"inline_keyboard": buttons},
