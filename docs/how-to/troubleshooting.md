@@ -101,35 +101,61 @@ Run `untether doctor` to see which engines are detected.
 - **Gemini CLI** (⚠️ deprecated): see below — individual and free Google accounts can no longer authenticate at all
 - **Amp** (⚠️ deprecated): see below — `amp login` still works, but the client version is refused remotely
 
-## A Gemini or Amp run returns an empty or nonsensical result
+## Why does my Gemini run stall, or my Amp run fail immediately?
 
-**Symptoms:** A `gemini` or `amp` run finishes quickly with no answer, an empty
-message, or (for `/threads`) "no threads found" — with nothing obviously wrong in
-the logs.
+Both engines are **deprecated** and currently non-functional on ordinary accounts.
+They fail in two different ways.
 
-Both CLIs **exit with status 0 while printing a fatal error to stderr**, so the
-failure can look like a successful empty run.
-
-Check by running the CLI directly:
+Confirm by running the CLI directly — both exit non-zero:
 
 ```bash
-gemini --output-format stream-json --prompt="say OK"
-amp -x "say OK"
+gemini --output-format stream-json --prompt="say OK"   # exits 1
+amp -x "say OK"                                        # exits 1
 ```
 
-- **Gemini** → `IneligibleTierError: This client is no longer supported for Gemini
-  Code Assist for individuals`. Gemini CLI reached **end-of-life for individual
-  and free Google accounts on 18 June 2026**. There is no fix — migrate to
-  [Antigravity CLI](https://antigravity.google) (Untether support is planned as a
-  separate engine) or use a supported engine. Enterprise / Google Cloud licences
-  may still work.
-- **Amp** → `426 This version of Amp is no longer supported. Run 'amp update' to
-  continue.` Updating the CLI may restore it, but Amp refuses out-of-date clients
-  on its own schedule, so this will recur. Untether does not track that cadence.
+### Amp — fails fast with a version refusal
 
-Both engines are **deprecated** and targeted for removal in 0.36.0 — see
+**Symptom:** the run ends in a few seconds as `error · amp`, with a `426` in the
+message.
+
+```
+426 {"error":{"message":"This version of Amp is no longer supported.
+     Run `amp update` to continue. ..."}}
+```
+
+Amp remotely refuses clients it considers out of date. `amp update` may restore
+it, but Amp re-refuses on its own schedule, so this recurs. Untether does not
+track that cadence.
+
+Note `amp threads list` (and therefore `/threads`) is a **local** command that
+does not hit the version gate — `/threads` can list threads normally while
+`amp -x` is refused.
+
+### Gemini — stalls instead of failing
+
+**Symptom:** the progress message sits at `starting · gemini` and never advances.
+Eventually the stall watchdog fires and you get
+`Auto-cancelled: session appears stuck (max_warnings)` — typically after ~10
+minutes.
+
+Run standalone, `gemini` prints `IneligibleTierError: This client is no longer
+supported for Gemini Code Assist for individuals` and exits 1. Spawned by
+Untether, the subprocess instead **hangs** without exiting, so Untether sees no
+events and no exit — hence the stall rather than an error message. Tracked as
+[#724](https://github.com/littlebearapps/untether/issues/724) and **not being
+fixed**, because the engine is deprecated.
+
+Gemini CLI reached **end-of-life for individual and free Google accounts on
+18 June 2026**. There is no fix — migrate to
+[Antigravity CLI](https://antigravity.google) (Untether support is planned as a
+separate engine) or use a supported engine. Enterprise / Google Cloud licences
+may still work, but Untether no longer verifies this.
+
+### What to do
+
+Both engines are targeted for removal in 0.36.0 — see
 [deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines).
-Switch to `claude`, `codex`, `opencode`, or `pi`.
+Switch to `claude`, `codex`, `opencode`, or `pi` via `/config → Engine & model`.
 
 ## Progress stuck on "starting"
 

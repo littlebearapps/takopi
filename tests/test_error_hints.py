@@ -267,8 +267,9 @@ class TestGetErrorHint:
 
 
 class TestDeprecatedEngineEndOfLife:
-    """#NEW: both dead engines exit rc=0 while printing a fatal error, so
-    without these hints the run surfaces as an empty answer, not a failure."""
+    """Both dead engines print a terminal error and exit 1. The hints must be
+    ordered ahead of the generic `invalid_request_error` pattern, which AMP's 426
+    payload matches — see test_amp_426_outranks_generic_invalid_request_error."""
 
     def test_gemini_ineligible_tier(self):
         msg = (
