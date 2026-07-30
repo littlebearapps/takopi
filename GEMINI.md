@@ -1,6 +1,6 @@
 # Untether — Gemini Instructions
 
-Telegram bridge for AI coding agents. Control Claude Code, Codex, OpenCode, Pi, Gemini CLI, and Amp from your phone or any device — agents run on your machine in the background while you're away from the terminal. Features interactive permissions, voice input, cost tracking, and live progress streaming.
+Telegram bridge for AI coding agents. Control Claude Code, Codex, OpenCode, and Pi from your phone (Gemini CLI and Amp are deprecated) or any device — agents run on your machine in the background while you're away from the terminal. Features interactive permissions, voice input, cost tracking, and live progress streaming.
 
 ## Stack & conventions
 

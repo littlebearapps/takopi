@@ -36,20 +36,25 @@ Already have a bot token? Skip the BotFather step with `untether --bot-token YOU
 
 ## Which AI coding agents does Untether support?
 
-Untether supports six agent CLIs out of the box:
+Untether supports four agent CLIs out of the box:
 
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — complex refactors, architecture, long context. Most interactive features (plan mode, ask mode, diff preview, the Pause & Outline plan gate) are Claude-specific.
 - **[Codex](https://github.com/openai/codex)** — fast edits, shell commands, OpenAI subscription via ChatGPT login.
 - **[OpenCode](https://github.com/opencode-ai/opencode)** — 75+ providers via Models.dev, local model support.
 - **[Pi](https://github.com/mariozechner/pi-coding-agent)** — multi-provider auth, conversational style.
-- **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** — Google Gemini models with configurable approval modes.
-- **[Amp](https://ampcode.com)** — Sourcegraph's coding agent with mode selection.
+
+Two further engines still load but are **deprecated** and targeted for removal in 0.36.0 — don't start new work on them:
+
+- **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** — Google ended Gemini CLI support for individual and free accounts on 18 June 2026 and directs users to [Antigravity CLI](https://antigravity.google). Enterprise / Google Cloud licences may still work, but Untether no longer verifies this. Antigravity is planned as a separate engine.
+- **[Amp](https://ampcode.com)** — Untether's Amp integration is no longer maintained. Amp remotely refuses clients it considers out of date, and Untether does not track that cadence, so a working setup can stop working without notice. This is a decision about our integration, not about Amp itself.
 
 You can switch between engines per-message by prefixing with `/<engine>` (e.g. `/claude`, `/codex`). Each chat or topic can also have its own default engine. The full per-engine feature matrix is in the [README](https://github.com/littlebearapps/untether#-supported-engines).
 
 ## Do I need an API key to use Untether?
 
-In most cases, no. Untether uses whatever authentication your agent CLI already has — your existing Claude Pro/Max subscription via OAuth, your ChatGPT Plus/Pro/Business plan via the Codex device-auth flow, your Gemini account, your Amp Sourcegraph login. If `claude auth status` works on your machine, Untether will use the same authentication.
+In most cases, no. Untether uses whatever authentication your agent CLI already has — your existing Claude Pro/Max subscription via OAuth, your ChatGPT Plus/Pro/Business plan via the Codex device-auth flow, or your OpenCode/Pi provider login. If `claude auth status` works on your machine, Untether will use the same authentication.
+
+The two [deprecated engines](#which-ai-coding-agents-does-untether-support) are the exception: Gemini CLI no longer authenticates individual or free Google accounts at all (upstream EOL, 18 June 2026), and Amp requires a current client that Untether does not track. Both fail with an authentication or version error rather than falling back to anything — Untether never silently reroutes a run to a different provider.
 
 API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) are only needed if you specifically want API billing instead of a subscription, or for engines that don't offer subscription auth (e.g. some OpenCode providers). Untether itself doesn't make any API calls — it just spawns the agent CLI as a subprocess.
 

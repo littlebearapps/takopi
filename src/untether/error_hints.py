@@ -3,9 +3,40 @@
 from __future__ import annotations
 
 # (pattern_substring, hint_text) — first match wins.
-# Order: auth → subscription/billing → overload/server → rate limits
-# → session → network → signals → execution.
+# Order: end-of-life/unsupported-client → auth → subscription/billing
+# → overload/server → rate limits → session → network → signals → execution.
 _HINT_PATTERNS: list[tuple[str, str]] = [
+    # --- Engine end-of-life / unsupported client ---
+    # These MUST stay first. Both signatures are emitted by CLIs that exit
+    # rc=0, so without a hint the run surfaces as an empty answer rather than a
+    # failure. They also outrank the generic "invalid_request_error" pattern
+    # below, which AMP's 426 payload would otherwise match with a vaguer hint.
+    (
+        "ineligibletiererror",
+        "Gemini CLI is end-of-life for individual and free Google accounts"
+        " (18 June 2026). The `gemini` engine is deprecated in Untether"
+        " \N{EM DASH} switch engines via /config, or migrate to Antigravity CLI"
+        " (antigravity.google).",
+    ),
+    (
+        "gemini code assist for individuals",
+        "Gemini CLI is end-of-life for individual and free Google accounts"
+        " (18 June 2026). The `gemini` engine is deprecated in Untether"
+        " \N{EM DASH} switch engines via /config, or migrate to Antigravity CLI"
+        " (antigravity.google).",
+    ),
+    (
+        "this version of amp is no longer supported",
+        "AMP is refusing this client version. Run `amp update` to upgrade."
+        " The `amp` engine is deprecated in Untether and may stop working again"
+        " without notice.",
+    ),
+    (
+        "no longer supported",
+        "The engine CLI reports that this client version or account tier is no"
+        " longer supported by its provider. Update the CLI, or switch engines"
+        " via /config.",
+    ),
     # --- Authentication ---
     (
         "access token could not be refreshed",

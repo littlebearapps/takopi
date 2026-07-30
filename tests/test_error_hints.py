@@ -264,3 +264,62 @@ class TestGetErrorHint:
         assert hint is not None
         # Both point to OpenAI, so either match is correct
         assert "openai" in hint.lower()
+
+
+class TestDeprecatedEngineEndOfLife:
+    """#NEW: both dead engines exit rc=0 while printing a fatal error, so
+    without these hints the run surfaces as an empty answer, not a failure."""
+
+    def test_gemini_ineligible_tier(self):
+        msg = (
+            "Error authenticating: IneligibleTierError: This client is no longer"
+            " supported for Gemini Code Assist for individuals. To continue using"
+            " Gemini, please migrate to the Antigravity suite of products:"
+            " https://antigravity.google"
+        )
+        hint = get_error_hint(msg)
+        assert hint is not None
+        assert "end-of-life" in hint
+        assert "antigravity" in hint.lower()
+
+    def test_gemini_reason_message_variant(self):
+        msg = (
+            "reasonMessage: 'This client is no longer supported for Gemini Code"
+            " Assist for individuals.'"
+        )
+        hint = get_error_hint(msg)
+        assert hint is not None
+        assert "antigravity" in hint.lower()
+
+    def test_amp_stale_client_426(self):
+        msg = (
+            'Error: 426 {"type":"error","error":{"type":"invalid_request_error",'
+            '"message":"This version of Amp is no longer supported. Run `amp'
+            ' update` to continue."}}'
+        )
+        hint = get_error_hint(msg)
+        assert hint is not None
+        assert "amp update" in hint
+
+    def test_amp_426_outranks_generic_invalid_request_error(self):
+        """The 426 payload also contains "invalid_request_error"; the specific
+        AMP hint must win because it is ordered first."""
+        msg = (
+            'Error: 426 {"error":{"type":"invalid_request_error","message":"This'
+            ' version of Amp is no longer supported."}}'
+        )
+        hint = get_error_hint(msg)
+        assert hint is not None
+        assert "amp update" in hint
+        assert "Invalid API request" not in hint
+
+    def test_generic_unsupported_client_fallback(self):
+        """An unrecognised vendor wording still gets an actionable hint."""
+        hint = get_error_hint(
+            "fatal: this build is no longer supported by the provider"
+        )
+        assert hint is not None
+        assert "no longer supported by its provider" in hint
+
+    def test_unrelated_message_still_unmatched(self):
+        assert get_error_hint("everything is fine, supported and happy") is None

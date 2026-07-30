@@ -1,6 +1,6 @@
 # Untether
 
-Telegram bridge for Claude Code, Codex, OpenCode, Pi, Gemini CLI, Amp, and other agent CLIs. Control your coding agents from anywhere — walking the dog, watching footy, at a friend's place.
+Telegram bridge for Claude Code, Codex, OpenCode, Pi, and other agent CLIs (Gemini CLI and Amp are deprecated — see below). Control your coding agents from anywhere — walking the dog, watching footy, at a friend's place.
 
 **Repo**: [littlebearapps/untether](https://github.com/littlebearapps/untether)
 **Based on**: [banteg/takopi](https://github.com/banteg/takopi) (upstream)
@@ -40,10 +40,10 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **Agent-initiated file delivery (outbox)** — agents write files to `.untether-outbox/` during a run; Untether sends them as Telegram documents on completion with `📎` captions; deny-glob security, size limits, file count cap, auto-cleanup; `[transports.telegram.files]` config
 - **Progress persistence** — active progress messages persisted to `active_progress.json`; on restart, orphan messages edited to "⚠️ interrupted by restart" with keyboard removed
 - **Resume line formatting** — visual separation with blank line and ↩️ prefix in final message footer
-- **`/continue`** — cross-environment resume; pick up the most recent CLI session from Telegram using each engine's native continue flag (`--continue`, `resume --last`, `--resume latest`); supported for Claude, Codex, OpenCode, Pi, Gemini (not AMP)
+- **`/continue`** — cross-environment resume; pick up the most recent CLI session from Telegram using each engine's native continue flag (`--continue`, `resume --last`, `--resume latest`); supported for Claude, Codex, OpenCode, Pi (Gemini deprecated; not AMP)
 - **Timezone-aware cron triggers** — per-cron `timezone` or global `default_timezone` with IANA names (e.g. `Australia/Melbourne`); DST-aware via `zoneinfo`; invalid names rejected at config parse time
 - **Hot-reload trigger configuration** — editing `untether.toml` applies cron/webhook changes immediately without restart; `TriggerManager` holds mutable state that the cron scheduler and webhook server reference at runtime; `handle_reload()` re-parses `[triggers]` on config file change
-- **Hot-reload Telegram bridge settings** — `voice_transcription` (incl. the #638 `voice_transcription_language` ISO-639-1 hint), file transfer, `allowed_user_ids`, timing, and `show_resume_line` settings reload without restart; `TelegramBridgeConfig` unfrozen (slots kept) with `update_from()` wired into `handle_reload()`; restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`) still warn
+- **Hot-reload Telegram bridge settings** — `voice_transcription` (incl. the #638 `voice_transcription_language` ISO-639-1 hint and the #691/#703 `voice_transcription_prompt` vocabulary bias, which ships a product-generic default), file transfer, `allowed_user_ids`, timing, and `show_resume_line` settings reload without restart; `TelegramBridgeConfig` unfrozen (slots kept) with `update_from()` wired into `handle_reload()`; restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`) still warn
 - **`/at` command** — one-shot delayed runs: `/at 30m <prompt>` schedules a prompt to run in 60s–24h; `/cancel` drops pending delays before firing; lost on restart (documented) with a per-chat cap of 20 pending delays; `telegram/at_scheduler.py` holds task-group + run_job refs
 - **`run_once` cron flag** — `[[triggers.crons]]` entries can set `run_once = true` to fire once then auto-disable; cron stays in TOML and re-activates on config reload or restart
 - **Trigger visibility (Tier 1)** — `/ping` shows per-chat trigger summary (`⏰ triggers: 1 cron (id, 9:00 AM daily (Melbourne))`); run footer shows `⏰ cron:<id>` / `⚡ webhook:<id>` for trigger-initiated runs; new `describe_cron()` utility renders common patterns in plain English
@@ -53,6 +53,28 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **Master trigger pause toggle (#294)** — `TriggerManager.pause()` / `resume()` / `is_paused` gate cron firing and webhook dispatch globally; webhook server returns `503 triggers paused` (with `Retry-After: 60`); `/health` endpoint reflects paused state. Wired into `/config` two ways: home-page button row (only when triggers configured) and a dedicated `📡 Triggers` page (`config:tg`) showing counts + Pause/Resume button. `/ping` switches to `⏸ triggers paused: … (suspended)` while paused. Pause is in-memory only — restart auto-resumes (safe default)
 
 See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` for implementation details.
+
+## Deprecated engines (Gemini CLI, AMP)
+
+Both are **deprecated** and targeted for **removal in 0.36.0**. They still load and
+run; they are not supported.
+
+- **`gemini`** — Google ended Gemini CLI support for individual and free accounts on
+  **2026-06-18**, directing users to Antigravity CLI. On those accounts it fails with
+  `IneligibleTierError: This client is no longer supported` — and exits **`rc=0`**, so
+  a failed run looks empty. Enterprise / Google Cloud licences may still work, unverified.
+- **`amp`** — integration unmaintained. AMP remotely refuses out-of-date clients
+  (`426 This version of Amp is no longer supported`), also at **`rc=0`**. Decision is
+  about our integration, not AMP itself. The AMP-only `/threads` command is deprecated
+  alongside it.
+
+**Working rule:** when a cross-engine sweep breaks either runner, `xfail`/`skip` the
+test — do NOT fix the runner. Security fixes still apply. Both are excluded from every
+integration-test tier. Full rule in `.claude/rules/runner-development.md` → "Deprecated
+engines — sweep exemption".
+
+Antigravity CLI (#558) is a **new engine**, not a `gemini` rename — it must not reuse
+the `gemini` engine id.
 
 ## Architecture
 
@@ -72,8 +94,8 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 | File | Purpose |
 |------|---------|
 | `runners/claude.py` | Claude Code runner, interactive features |
-| `runners/gemini.py` | Gemini CLI runner |
-| `runners/amp.py` | AMP CLI runner (Sourcegraph) |
+| `runners/gemini.py` | Gemini CLI runner (⚠️ deprecated) |
+| `runners/amp.py` | AMP CLI runner (Sourcegraph) (⚠️ deprecated) |
 | `runner_bridge.py` | Connects runners to Telegram presenter, injects agent preamble, auto-continue with signal death suppression, empty-resume quarantine-and-fresh recovery |
 | `session_quarantine.py` | Persistent QuarantineStore (`session_quarantine.json`): poisoned-session markers, forced-teardown quarantine, resume divert (#631/#632) |
 | `cost_tracker.py` | Per-run/daily cost tracking and budget alerts |
@@ -191,53 +213,55 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 
 ## Tests
 
-3133 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
+3161 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
 
 Key test files:
 
 - `test_claude_control.py` — 100 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, outline gate (#570 retired the progressive cooldown), auto permission mode, diff_preview plan bypass
-- `test_callback_dispatch.py` — 26 tests: callback parsing, dispatch toast/ephemeral behaviour, early answering
-- `test_exec_bridge.py` — 270 tests: ephemeral notification cleanup, approval push notifications, progressive stall warnings, stall diagnostics, stall auto-cancel with CPU-active suppression (sleeping-process aware), tool-active repeat suppression, approval-aware stall threshold, MCP tool stall threshold, frozen ring buffer hung escalation, session summary, PID/stream threading, auto-continue detection, signal death suppression, Type-A stream-idle auto-retry (#572), empty-resume quarantine-and-fresh recovery, resume divert/clear, empty-result diagnostics
-- `test_ask_user_question.py` — 52 tests: AskUserQuestion control request handling, question extraction, pending request registry, answer routing, option button rendering, multi-question flows, structured answer responses, ask mode toggle auto-deny, late-tap already-answered memo (TTL + entry cap + channel scoping, #698), tracked-action advance so the progress heartbeat can't re-render Q1 over Q2 (#709), concurrent final-tap bounds check (#710), HTML escaping at the `parse_mode="HTML"` boundary with a raw-by-default guard against double-escaping the markdown-rendered model title (#713)
+- `test_callback_dispatch.py` — 30 tests: callback parsing, dispatch toast/ephemeral behaviour, early answering
+- `test_exec_bridge.py` — 280 tests: ephemeral notification cleanup, approval push notifications, progressive stall warnings, stall diagnostics, stall auto-cancel with CPU-active suppression (sleeping-process aware), tool-active repeat suppression, approval-aware stall threshold, MCP tool stall threshold, frozen ring buffer hung escalation, session summary, PID/stream threading, auto-continue detection (incl. the `saw_result` latch that stops the salvage predicate firing on healthy completed runs, #716), signal death suppression, Type-A stream-idle auto-retry (#572), empty-resume quarantine-and-fresh recovery, resume divert/clear, empty-result diagnostics
+- `test_ask_user_question.py` — 56 tests: AskUserQuestion control request handling, question extraction, pending request registry, answer routing, option button rendering, multi-question flows, structured answer responses, ask mode toggle auto-deny, late-tap already-answered memo (TTL + entry cap + channel scoping, #698), tracked-action advance so the progress heartbeat can't re-render Q1 over Q2 (#709), concurrent final-tap bounds check (#710), HTML escaping at the `parse_mode="HTML"` boundary with a raw-by-default guard against double-escaping the markdown-rendered model title (#713), channel-scoped option taps so a tap in one chat cannot silently answer another chat's question, plus the dispatch early-toast hook's legacy-signature fallback (#715)
 - `test_diff_preview.py` — 14 tests: Edit diff display, Write content preview, Bash command display, line/char truncation
-- `test_cost_tracker.py` — 25 tests: cost accumulation, per-run/daily budget thresholds, warning levels, daily reset, auto-cancel flag, one-shot `config.cost_visibility_gap` warning (#658), budget-independent `cost.run_outlier` per-run spend signal with configurable threshold and notice opt-out (#702)
+- `test_cost_tracker.py` — 30 tests: cost accumulation, per-run/daily budget thresholds, warning levels, daily reset, auto-cancel flag, one-shot `config.cost_visibility_gap` warning (#658), budget-independent `cost.run_outlier` per-run spend signal with configurable threshold and notice opt-out (#702), run-shape fields on that signal — `num_turns`/`usd_per_turn`/durations/token block, omitted when absent or mistyped (#717)
 - `test_export_command.py` — 16 tests: session event recording, markdown/JSON export formatting, usage integration, session trimming
 - `test_browse_command.py` — 39 tests: path registry, directory listing, file preview, inline keyboard buttons, project-aware root resolution, security (path traversal)
-- `test_meta_line.py` — 54 tests: model name shortening, meta line formatting, ProgressTracker meta storage/snapshot, footer ordering (context/meta/resume)
-- `test_runner_utils.py` — 34 tests: error formatting helpers, drain_stderr capture, enriched error messages, stderr sanitisation
+- `test_meta_line.py` — 70 tests: model name shortening (incl. Claude 5 major-only IDs, the `fable` family and the `[1m]` context marker, #688), meta line formatting, ProgressTracker meta storage/snapshot, footer ordering (context/meta/resume)
+- `test_error_hints.py` — end-of-life/unsupported-client hints ordered ahead of the generic `invalid_request_error` pattern, so Gemini's `IneligibleTierError` and AMP's `426` (both emitted at `rc=0`) surface as failures rather than empty answers
+- `test_threads_command.py` — `/threads` (AMP-only, deprecated): thread registry, formatting, callback-data bounds, plus `rc=0` fatal-stderr promotion so an AMP `426` refusal no longer renders as "No AMP threads found"
+- `test_runner_utils.py` — 43 tests: error formatting helpers, drain_stderr capture, enriched error messages, stderr sanitisation
 - `test_shutdown.py` — 19 tests: shutdown state transitions, idempotency, reset, evidence-gated drain-timeout selection, self-restart argv matcher + descendant evidence scan (#690)
 - `test_drain_notify.py` — 15 tests: drain start/timeout notices, per-chat dedupe, forum-topic thread routing + (channel, thread) dedupe (#665)
-- `test_preamble.py` — 6 tests: default preamble injection, disabled preamble, custom text override, empty text disables, settings defaults
+- `test_preamble.py` — 18 tests: default preamble injection, disabled preamble, custom text override, empty text disables, settings defaults
 - `test_restart_command.py` — 3 tests: command triggers shutdown, idempotent response, command id
-- `test_cooldown_bypass.py` — 24 tests: outline gate (hold-open with outline, auto-deny without), plan-input gate on plan-file CLIs (#659), no-text auto-deny, hold-open outline flow (#570 retired the time-based cooldown escalation)
-- `test_verbose_progress.py` — 21 tests: format_verbose_detail() for each tool type, MarkdownFormatter verbose mode, compact regression
+- `test_cooldown_bypass.py` — 27 tests: outline gate (hold-open with outline, auto-deny without), plan-input gate on plan-file CLIs (#659), no-text auto-deny, hold-open outline flow (#570 retired the time-based cooldown escalation)
+- `test_verbose_progress.py` — 39 tests: format_verbose_detail() for each tool type, MarkdownFormatter verbose mode, compact regression
 - `test_verbose_command.py` — 7 tests: /verbose toggle on/off/clear, backend id
-- `test_config_command.py` — 240 tests: home page, plan mode/ask mode/verbose/engine/listen/model/reasoning sub-pages, toggle actions, callback vs command routing, button layout, engine-aware visibility, default resolution
+- `test_config_command.py` — 242 tests: home page, plan mode/ask mode/verbose/engine/listen/model/reasoning sub-pages, toggle actions, callback vs command routing, button layout, engine-aware visibility, default resolution, deprecated-engine `⚠️` glyph + notice (still selectable, never hidden)
 - `test_pi_compaction.py` — 6 tests: compaction start/end, aborted, no tokens, sequence
 - `test_proc_diag.py` — 56 tests: format_diag, is_cpu_active, collect_proc_diag (Linux /proc reads), ProcessDiag defaults, macOS ps backend (TIME parser, process table, tree CPU, dispatch — #689), read_cmdline_argv
 - `test_exec_runner.py` — 50 tests: event tracking (event_count, recent_events ring buffer, PID in StartedEvent meta), JsonlStreamState defaults, watchdog approval-pending discriminator (registry probe first, non-positional ring scan fallback, same-tick `rate_limit_event`, #697)
-- `test_build_args.py` — 42 tests: CLI argument construction for all 6 engines, model/reasoning/permission flags
+- `test_build_args.py` — 59 tests: CLI argument construction for all 6 engines, model/reasoning/permission flags
 - `test_telegram_files.py` — 17 tests: file helpers, deduplication, deny globs, default upload paths
-- `test_telegram_file_transfer_helpers.py` — 48 tests: `/file put` and `/file get` command handling, media groups, force overwrite
-- `test_loop_coverage.py` — 29 tests: update loop edge cases, message routing, callback dispatch, shutdown integration
+- `test_telegram_file_transfer_helpers.py` — 50 tests: `/file put` and `/file get` command handling, media groups, force overwrite
+- `test_loop_coverage.py` — 42 tests: update loop edge cases, message routing, callback dispatch, shutdown integration
 - `test_telegram_topics_command.py` — 16 tests: `/new` cancellation (cancel helper, chat/topic modes, running task cleanup), `/ctx` binding, `/topic` command
-- `test_trigger_server.py` — 18 tests: health, auth, event filter, multipart (file upload, form fields, size limit, filename sanitisation, auth rejection), rate limit burst 429, fire-and-forget dispatch
-- `test_trigger_actions.py` — 29 tests: file_write (traversal, deny globs, size, conflicts, multipart short-circuit), http_forward (SSRF, retries, headers), notify_only
-- `test_trigger_cron.py` — 21 tests: 5-field cron matching, timezone conversion (Melbourne, DST, per-cron/default override), step validation
-- `test_trigger_settings.py` — 41 tests: CronConfig/WebhookConfig/CronFetchConfig/TriggersSettings validation, action fields, multipart defaults, timezone
+- `test_trigger_server.py` — 34 tests: health, auth, event filter, multipart (file upload, form fields, size limit, filename sanitisation, auth rejection), rate limit burst 429, fire-and-forget dispatch
+- `test_trigger_actions.py` — 31 tests: file_write (traversal, deny globs, size, conflicts, multipart short-circuit), http_forward (SSRF, retries, headers), notify_only
+- `test_trigger_cron.py` — 27 tests: 5-field cron matching, timezone conversion (Melbourne, DST, per-cron/default override), step validation
+- `test_trigger_settings.py` — 58 tests: CronConfig/WebhookConfig/CronFetchConfig/TriggersSettings validation, action fields, multipart defaults, timezone
 - `test_trigger_ssrf.py` — 73 tests: IPv4/IPv6 blocking, URL validation, DNS resolution, allowlist overrides
-- `test_trigger_fetch.py` — 12 tests: HTTP GET/POST, file read, parse modes, failure handling, prompt building
-- `test_trigger_auth.py` — 12 tests: bearer token, HMAC-SHA256/SHA1, timing-safe comparison
-- `test_trigger_rate_limit.py` — 5 tests: token bucket fill/drain, per-key isolation, refill timing
-- `test_trigger_manager.py` — 23 tests: TriggerManager init/update/clear, webhook server hot-reload (add/remove/update routes, secret changes, health count), cron schedule swapping, timezone updates; rc4 helpers (crons_for_chat, webhooks_for_chat, cron_ids, webhook_ids, remove_cron, atomic iteration)
-- `test_describe_cron.py` — 31 tests: human-friendly cron rendering (daily, weekday ranges, weekday lists, single day, timezone suffix, fallback to raw, AM/PM boundaries)
+- `test_trigger_fetch.py` — 25 tests: HTTP GET/POST, file read, parse modes, failure handling, prompt building
+- `test_trigger_auth.py` — 16 tests: bearer token, HMAC-SHA256/SHA1, timing-safe comparison
+- `test_trigger_rate_limit.py` — 4 tests: token bucket fill/drain, per-key isolation, refill timing
+- `test_trigger_manager.py` — 35 tests: TriggerManager init/update/clear, webhook server hot-reload (add/remove/update routes, secret changes, health count), cron schedule swapping, timezone updates; rc4 helpers (crons_for_chat, webhooks_for_chat, cron_ids, webhook_ids, remove_cron, atomic iteration)
+- `test_describe_cron.py` — 37 tests: human-friendly cron rendering (daily, weekday ranges, weekday lists, single day, timezone suffix, fallback to raw, AM/PM boundaries)
 - `test_trigger_meta_line.py` — 6 tests: trigger source rendering in `format_meta_line()`, ordering relative to model/effort/permission
 - `test_bridge_config_reload.py` — 20 tests: TelegramBridgeConfig unfrozen (slots preserved), `update_from()` copies all 11 fields, files swap, chat_ids/voice_transcription_api_key edge cases, trigger_manager field default, `RESTART_REQUIRED_FIELDS` ClassVar invariants (#318), `_notify_restart_required` broadcast to project chats + admin DMs with per-chat failure isolation (#318 follow-up)
-- `test_at_command.py` — 34 tests: `/at` parse (valid/invalid suffixes, bounds, case-insensitive), `_format_delay`, schedule/cancel, per-chat cap, scheduler install/uninstall
+- `test_at_command.py` — 38 tests: `/at` parse (valid/invalid suffixes, bounds, case-insensitive), `_format_delay`, schedule/cancel, per-chat cap, scheduler install/uninstall
 - `test_offset_persistence.py` — 15 tests: Telegram update_id round-trip, corrupt JSON handling, atomic write, `DebouncedOffsetWriter` interval/max-pending semantics, explicit flush
 - `test_sdnotify.py` — 7 tests: NOTIFY_SOCKET handling (absent/empty/filesystem/abstract-namespace), send error swallowing, UTF-8 encoding
 - `test_session_quarantine.py` — 7 tests: QuarantineStore round-trip persistence, engine isolation, malformed/corrupt state-file resilience, age-based pruning to disk, singleton accessor + injection (#631/#632)
-- `test_noop_resume_harness.py` — 3 tests: end-to-end no-op empty-resume reproduction via the fake-claude CLI (`tests/fake_clis/fake_claude_noop_resume.py`) — real ClaudeRunner + handle_message drive quarantine-and-fresh recovery, healthy-resume negative control, linger-scenario emission shape (#634)
+- `test_noop_resume_harness.py` — 6 tests: end-to-end no-op empty-resume reproduction via the fake-claude CLI (`tests/fake_clis/fake_claude_noop_resume.py`) — real ClaudeRunner + handle_message drive quarantine-and-fresh recovery, healthy-resume negative control, linger-scenario emission shape (#634); also hosts the `trailing_user_after_result` scenario proving a post-`result` frame never reaches the stream (#716)
 - `test_attestation_marker.py` — 5 tests: `scripts/run-integration-tests.sh` SHA-binding (#674) — `head_sha` auto-derived from the script repo, `--head-sha` + `UT_INTEGRATION_HEAD_SHA` overrides, `dev_bot_id` default + `UT_DEV_BOT_ID` override, tiers/notes preserved in the marker JSON
 
 ## Development
@@ -401,7 +425,7 @@ Before tagging a release:
 
 ## Help-centre FAQ
 
-`docs/faq/faq.md` (12 H2 question-shaped Q/A pairs; renamed from `docs/faq/index.md` in #483 so the help-centre URL becomes `/help/untether/faq/`) backs the marketing-site **FAQPage Schema.org** pipeline shipped on `feature/help-seo-geo-items-1-4` in [`littlebearapps/littlebearapps.com`](https://github.com/littlebearapps/littlebearapps.com). Once the docs-sync mapping in `scripts/docs-sync.config.ts` registers `untether → docs/faq → category: faq`, the marketing site emits `<script type="application/ld+json">` `FAQPage` JSON-LD on every help-centre deploy, unlocking AI-citation surface (ChatGPT, Perplexity, Google AI Overviews) and SERP rich-snippet eligibility.
+`docs/faq/faq.md` (15 H2 question-shaped Q/A pairs; renamed from `docs/faq/index.md` in #483 so the help-centre URL becomes `/help/untether/faq/`) backs the marketing-site **FAQPage Schema.org** pipeline shipped on `feature/help-seo-geo-items-1-4` in [`littlebearapps/littlebearapps.com`](https://github.com/littlebearapps/littlebearapps.com). Once the docs-sync mapping in `scripts/docs-sync.config.ts` registers `untether → docs/faq → category: faq`, the marketing site emits `<script type="application/ld+json">` `FAQPage` JSON-LD on every help-centre deploy, unlocking AI-citation surface (ChatGPT, Perplexity, Google AI Overviews) and SERP rich-snippet eligibility.
 
 **The file MUST NOT be deleted or moved** — that silently breaks the docs-sync mapping and regresses the schema on the next deploy. The repo enforces this via the `help-faq-protect.sh` Bash hook which blocks `rm`, `git rm`, `mv`-away, and shell `>` truncation. **Edits ARE encouraged**: keep the FAQ in sync with new features as they land in `CHANGELOG.md`. See [`.claude/rules/help-faq.md`](.claude/rules/help-faq.md) for the full update cadence and shape rules. Tracking issues: [#477](https://github.com/littlebearapps/untether/issues/477) (creation), [#483](https://github.com/littlebearapps/untether/issues/483) (URL rename).
 

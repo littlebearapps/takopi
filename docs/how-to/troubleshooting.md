@@ -79,10 +79,10 @@ npm install -g opencode-ai@latest
 # Pi
 npm install -g @mariozechner/pi-coding-agent
 
-# Gemini CLI
+# Gemini CLI — DEPRECATED, see below
 npm install -g @google/gemini-cli
 
-# Amp
+# Amp — DEPRECATED, see below
 npm install -g @sourcegraph/amp
 ```
 
@@ -98,8 +98,38 @@ Run `untether doctor` to see which engines are detected.
 - **Claude Code:** Run `claude login` to authenticate. On macOS, credentials are stored in Keychain; on Linux, in `~/.claude/.credentials.json`
 - **OpenCode:** Run `opencode` and authenticate with your chosen provider
 - **Pi:** Run `pi` and log in with your provider
-- **Gemini CLI:** Run `gemini` and authenticate with your Google account
-- **Amp:** Run `amp` and sign in with your Sourcegraph account
+- **Gemini CLI** (⚠️ deprecated): see below — individual and free Google accounts can no longer authenticate at all
+- **Amp** (⚠️ deprecated): see below — `amp login` still works, but the client version is refused remotely
+
+## A Gemini or Amp run returns an empty or nonsensical result
+
+**Symptoms:** A `gemini` or `amp` run finishes quickly with no answer, an empty
+message, or (for `/threads`) "no threads found" — with nothing obviously wrong in
+the logs.
+
+Both CLIs **exit with status 0 while printing a fatal error to stderr**, so the
+failure can look like a successful empty run.
+
+Check by running the CLI directly:
+
+```bash
+gemini --output-format stream-json --prompt="say OK"
+amp -x "say OK"
+```
+
+- **Gemini** → `IneligibleTierError: This client is no longer supported for Gemini
+  Code Assist for individuals`. Gemini CLI reached **end-of-life for individual
+  and free Google accounts on 18 June 2026**. There is no fix — migrate to
+  [Antigravity CLI](https://antigravity.google) (Untether support is planned as a
+  separate engine) or use a supported engine. Enterprise / Google Cloud licences
+  may still work.
+- **Amp** → `426 This version of Amp is no longer supported. Run 'amp update' to
+  continue.` Updating the CLI may restore it, but Amp refuses out-of-date clients
+  on its own schedule, so this will recur. Untether does not track that cadence.
+
+Both engines are **deprecated** and targeted for removal in 0.36.0 — see
+[deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines).
+Switch to `claude`, `codex`, `opencode`, or `pi`.
 
 ## Progress stuck on "starting"
 

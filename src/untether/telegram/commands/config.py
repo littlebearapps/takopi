@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ...commands import CommandBackend, CommandContext, CommandResult
+from ...ids import DEPRECATED_ENGINES
 from ...logging import get_logger
 from ...transport import RenderedMessage
 
@@ -1075,13 +1076,29 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
         f"Model: <b>{model_label}</b>",
         "",
         "Use <code>/model set &lt;name&gt;</code> to choose a model.",
+    ]
+
+    if any(eid in DEPRECATED_ENGINES for eid in available):
+        deprecated_shown = ", ".join(
+            eid for eid in available if eid in DEPRECATED_ENGINES
+        )
+        lines += [
+            "",
+            f"⚠️ <b>{deprecated_shown}</b> — deprecated, no longer supported,"
+            " removal planned. Prefer another engine.",
+        ]
+
+    lines += [
         "",
         f'📖 <a href="{_DOCS_BASE}switch-engines/">Learn more</a>',
     ]
 
     engine_buttons = [
         {
-            "text": _check(eid, active=current == eid),
+            "text": _check(
+                f"{eid} ⚠️" if eid in DEPRECATED_ENGINES else eid,
+                active=current == eid,
+            ),
             "callback_data": f"config:ag:{eid}",
         }
         for eid in available
