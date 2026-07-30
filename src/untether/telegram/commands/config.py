@@ -2202,8 +2202,14 @@ class ConfigCommand:
     answer_early = True
 
     @staticmethod
-    def early_answer_toast(args_text: str) -> str | None:
-        """Return a confirmation toast for toggle actions, None for navigation."""
+    def early_answer_toast(
+        args_text: str, *, channel_id: int | None = None
+    ) -> str | None:
+        """Return a confirmation toast for toggle actions, None for navigation.
+
+        ``channel_id`` is accepted for the shared hook signature (#715);
+        this toast is derived from the callback data alone.
+        """
         parts = args_text.split(":")
         if len(parts) < 2:
             return None  # Home page navigation
