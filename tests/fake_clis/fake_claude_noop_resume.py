@@ -250,6 +250,48 @@ def _scenario_resume_survives_sigterm(argv: list[str]) -> int:
     return 0
 
 
+def _emit_tool_result(sid: str) -> None:
+    """A ``user``-typed frame carrying a tool_result block — the shape a
+    trailing tool result takes on the wire (#716)."""
+    emit(
+        {
+            "type": "user",
+            "session_id": sid,
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tu_trailing",
+                        "content": "ok",
+                    }
+                ],
+            },
+        }
+    )
+
+
+def _scenario_trailing_user_after_result(argv: list[str]) -> int:
+    """#716: emit a healthy run, then a trailing ``user`` (tool_result)
+    frame AFTER the terminal ``result``.
+
+    Establishes what the parser actually does with a post-result frame:
+    whether it can still overwrite ``stream.last_event_type`` (the
+    mechanism the issue asserts) or whether the reader has already stopped
+    at the ``result`` (in which case a production ``session.summary`` line
+    reading ``last_event_type=user`` on an ``ok=True`` run has a different
+    cause). Either way ``saw_result`` must be True.
+    """
+    resume = _resume_arg(argv)
+    sid = resume or f"S-fresh-{os.getpid()}"
+    _emit_init(sid)
+    _emit_assistant_text(sid, "Working.")
+    _emit_real_result(sid, text="All done.", num_turns=3, cost=0.08)
+    _emit_tool_result(sid)
+    time.sleep(_linger_s())
+    return 0
+
+
 def _scenario_hang_before_result(argv: list[str]) -> int:
     """#667: emit init + a partial assistant chunk, then hang for
     FAKE_CLAUDE_LINGER_S WITHOUT ever emitting a result.
@@ -276,6 +318,7 @@ _SCENARIOS = {
     "healthy_resume": _scenario_healthy_resume,
     "resume_survives_sigterm": _scenario_resume_survives_sigterm,
     "hang_before_result": _scenario_hang_before_result,
+    "trailing_user_after_result": _scenario_trailing_user_after_result,
 }
 
 

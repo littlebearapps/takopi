@@ -893,8 +893,13 @@ async def test_send_next_ask_question_message_no_thread() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_command_ctx(args_text: str):
-    """Build a minimal CommandContext-like mock for AskQuestionCommand.handle tests."""
+def _make_command_ctx(args_text: str, *, channel_id: int = CHAT_A):
+    """Build a minimal CommandContext-like mock for AskQuestionCommand.handle tests.
+
+    #715: ``ctx.message.channel_id`` must be a real int — the handler now
+    scopes its flow lookup by it, and a bare ``MagicMock`` attribute would
+    silently match no flow.
+    """
     from unittest.mock import MagicMock
 
     ctx = MagicMock()
@@ -902,6 +907,7 @@ def _make_command_ctx(args_text: str):
     ctx.executor = AsyncMock()
     ctx.executor.edit = AsyncMock(return_value=None)
     ctx.message = MagicMock()
+    ctx.message.channel_id = channel_id
     return ctx
 
 
@@ -1520,3 +1526,150 @@ async def test_713_send_next_question_escapes() -> None:
     assert message.extra["parse_mode"] == "HTML"
     assert "&lt;b&gt;A&lt;/b&gt;" in message.text
     assert "&amp;" in message.text
+
+
+# ── #715: option taps must be channel-scoped ──
+
+
+@pytest.mark.anyio
+async def test_715_option_tap_answers_its_own_chats_flow(monkeypatch) -> None:
+    """Two concurrent AskUserQuestion flows in different chats; a tap in the
+    SECOND chat must answer the second flow and leave the first untouched.
+
+    Before the fix the handler called ``get_ask_question_flow()`` with no
+    scope, and the resolver returns the FIRST flow in the registry when
+    ``channel_id`` is None — so chat B's tap was recorded against chat A's
+    question. Callback data is positional (``aq:opt:N``), so nothing failed:
+    the wrong question was silently answered with the option at that index.
+    """
+    from untether.runners import claude as claude_mod
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow_a = AskQuestionState(
+        request_id="req-715-a",
+        channel_id=CHAT_A,
+        questions=[
+            {
+                "question": "Deploy to prod?",
+                "options": [{"label": "Yes"}, {"label": "No"}],
+            }
+        ],
+    )
+    flow_b = AskQuestionState(
+        request_id="req-715-b",
+        channel_id=CHAT_B,
+        questions=[
+            {
+                "question": "Delete the branch?",
+                "options": [{"label": "Keep"}, {"label": "Delete"}],
+            }
+        ],
+    )
+    # A is inserted first, so it is what an unscoped lookup would return.
+    _ASK_QUESTION_FLOWS[flow_a.request_id] = flow_a
+    _ASK_QUESTION_FLOWS[flow_b.request_id] = flow_b
+
+    answered: list[str] = []
+
+    async def fake_answer(request_id: str) -> bool:
+        answered.append(request_id)
+        _ASK_QUESTION_FLOWS.pop(request_id, None)
+        return True
+
+    # `handle` imports the symbol from the runner module at call time, so
+    # patch it there rather than on the command module.
+    monkeypatch.setattr(
+        claude_mod, "answer_ask_question_with_options", fake_answer, raising=True
+    )
+
+    # Tap option 1 in chat B — "Delete".
+    ctx = _make_command_ctx("opt:1", channel_id=CHAT_B)
+    await cmd_mod.AskQuestionCommand().handle(ctx)
+
+    assert answered == ["req-715-b"], "the tap must answer the tapping chat's flow"
+    assert flow_b.answers == {"Delete the branch?": "Delete"}
+    # Chat A's flow is untouched: still live, no answer recorded.
+    assert flow_a.answers == {}
+    assert flow_a.current_index == 0
+    assert _ASK_QUESTION_FLOWS.get("req-715-a") is flow_a
+
+
+@pytest.mark.anyio
+async def test_715_tap_in_chat_with_no_flow_does_not_steal_another(monkeypatch) -> None:
+    """A tap from a chat with no outstanding question must report "no active
+    question" rather than answering whichever flow happens to be first."""
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow_a = AskQuestionState(
+        request_id="req-715-c",
+        channel_id=CHAT_A,
+        questions=[
+            {"question": "Proceed?", "options": [{"label": "Yes"}, {"label": "No"}]}
+        ],
+    )
+    _ASK_QUESTION_FLOWS[flow_a.request_id] = flow_a
+
+    ctx = _make_command_ctx("opt:0", channel_id=CHAT_B)
+    result = await cmd_mod.AskQuestionCommand().handle(ctx)
+
+    assert result is not None
+    assert result.text == "No active question"
+    assert flow_a.answers == {}
+    assert _ASK_QUESTION_FLOWS.get("req-715-c") is flow_a
+
+
+def test_715_early_toast_is_channel_scoped() -> None:
+    """The pre-``handle`` toast is chosen from per-chat registry state, so it
+    must be scoped too — otherwise a chat with no question of its own reads
+    another chat's live flow and toasts "Selected" for a no-op tap."""
+    from untether.telegram.commands.ask_question import AskQuestionCommand
+
+    flow_a = AskQuestionState(
+        request_id="req-715-d",
+        channel_id=CHAT_A,
+        questions=[{"question": "Go?", "options": [{"label": "Yes"}]}],
+    )
+    _ASK_QUESTION_FLOWS[flow_a.request_id] = flow_a
+    # Chat B answered a flow a moment ago and has nothing live.
+    _record_answered_ask_flow("req-715-e", CHAT_B)
+
+    assert (
+        AskQuestionCommand.early_answer_toast("opt:0", channel_id=CHAT_B)
+        == "Already answered"
+    )
+    # Chat A has a live flow, so it gets the normal selection toast.
+    assert (
+        AskQuestionCommand.early_answer_toast("opt:0", channel_id=CHAT_A) == "Selected"
+    )
+
+
+def test_715_dispatch_hook_falls_back_to_legacy_signature() -> None:
+    """``early_answer_toast`` is a duck-typed internal hook, not part of the
+    ``CommandBackend`` Protocol. A backend still carrying the old
+    ``(args_text)`` signature must degrade to that call rather than raising a
+    TypeError out of dispatch — which would kill the whole callback."""
+    from untether.telegram.commands.dispatch import _early_answer_toast
+
+    class LegacyBackend:
+        answer_early = True
+
+        @staticmethod
+        def early_answer_toast(args_text: str) -> str | None:
+            return f"legacy:{args_text}"
+
+    class ScopedBackend:
+        answer_early = True
+
+        @staticmethod
+        def early_answer_toast(args_text: str, *, channel_id: int | None = None):
+            return f"scoped:{args_text}:{channel_id}"
+
+    class NoHookBackend:
+        answer_early = True
+
+    assert _early_answer_toast(LegacyBackend(), "opt:0", CHAT_A) == "legacy:opt:0"
+    assert (
+        _early_answer_toast(ScopedBackend(), "opt:0", CHAT_A)
+        == f"scoped:opt:0:{CHAT_A}"
+    )
+    assert _early_answer_toast(NoHookBackend(), "opt:0", CHAT_A) is None

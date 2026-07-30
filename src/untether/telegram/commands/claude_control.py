@@ -81,8 +81,15 @@ class ClaudeControlCommand:
     answer_early = True
 
     @staticmethod
-    def early_answer_toast(args_text: str) -> str | None:
-        """Return a toast string for immediate callback answering, or None."""
+    def early_answer_toast(
+        args_text: str, *, channel_id: int | None = None
+    ) -> str | None:
+        """Return a toast string for immediate callback answering, or None.
+
+        ``channel_id`` is accepted for the shared hook signature (#715);
+        this toast is a pure action-label lookup and does not consult any
+        per-chat registry, so it does not use it.
+        """
         action = args_text.split(":", 1)[0].lower() if args_text else ""
         return _EARLY_TOASTS.get(action)
 

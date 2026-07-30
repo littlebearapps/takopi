@@ -73,14 +73,22 @@ class AskQuestionCommand:
     answer_early = True
 
     @staticmethod
-    def early_answer_toast(args_text: str) -> str | None:
+    def early_answer_toast(
+        args_text: str, *, channel_id: int | None = None
+    ) -> str | None:
         from ...runners.claude import get_ask_question_flow, recently_answered_ask_flow
 
         action = args_text.split(":", 1)[0].lower() if args_text else ""
         # #698: the early answer fires before `handle` runs, so this toast is
         # the only feedback a late tap on an already-answered keyboard gets.
         # Don't tell the user "Selected" for a tap that will do nothing.
-        if get_ask_question_flow() is None and recently_answered_ask_flow() is not None:
+        # #715: both lookups are channel-scoped. Unscoped, a chat with no
+        # outstanding question would see another chat's live flow and toast
+        # "Selected" for a tap that `handle` then rejects.
+        if (
+            get_ask_question_flow(channel_id=channel_id) is None
+            and recently_answered_ask_flow(channel_id=channel_id) is not None
+        ):
             return _ALREADY_ANSWERED_TOAST
         return _EARLY_TOASTS.get(action)
 
@@ -97,12 +105,21 @@ class AskQuestionCommand:
         parts = ctx.args_text.split(":", 1)
         action = parts[0].lower() if parts else ""
 
-        flow = get_ask_question_flow()
+        # #715: scope the lookup to the chat the tap came from. The resolver
+        # returns the FIRST flow in the registry when unscoped, so with two
+        # concurrent AskUserQuestion flows a tap in chat B was answered
+        # against whichever iterated first — silently recording B's option
+        # index as A's answer, because the callback data (`aq:opt:N`) is
+        # positional and so never fails. #698 already channel-scoped the
+        # sibling `recently_answered_ask_flow` lookup for exactly this
+        # reason; the live-flow lookup one line up was left unscoped.
+        channel_id = ctx.message.channel_id
+        flow = get_ask_question_flow(channel_id=channel_id)
         if flow is None:
             # #698: an option tap that lost the race against the (async, outbox-
             # queued) keyboard strip is an expected user race, not an unexplained
             # missing flow — INFO, and say something true.
-            answered = recently_answered_ask_flow()
+            answered = recently_answered_ask_flow(channel_id=channel_id)
             if answered is not None:
                 logger.info(
                     "ask_question.flow_already_answered",
