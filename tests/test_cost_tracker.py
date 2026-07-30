@@ -440,7 +440,7 @@ def test_717_outlier_keeps_the_702_fields(monkeypatch) -> None:
     warnings = _capture_outlier(monkeypatch, _outlier_settings())
     text = _check_run_cost_outlier(_claude_usage(cost=25.56, num_turns=40))
 
-    fields = [w[1] for w in warnings if w[0] == "cost.run_outlier"][0]
+    fields = next(w[1] for w in warnings if w[0] == "cost.run_outlier")
     assert fields["total_cost_usd"] == 25.56
     assert fields["threshold_usd"] == 20.0
     assert fields["budget_configured"] is False
@@ -459,7 +459,7 @@ def test_717_outlier_omits_absent_shape_fields(monkeypatch) -> None:
     warnings = _capture_outlier(monkeypatch, _outlier_settings())
     _check_run_cost_outlier({"total_cost_usd": 30.0})
 
-    fields = [w[1] for w in warnings if w[0] == "cost.run_outlier"][0]
+    fields = next(w[1] for w in warnings if w[0] == "cost.run_outlier")
     assert fields["total_cost_usd"] == 30.0
     for absent in (
         "num_turns",
@@ -486,7 +486,7 @@ def test_717_outlier_survives_a_malformed_token_block(monkeypatch) -> None:
         }
     )
 
-    fields = [w[1] for w in warnings if w[0] == "cost.run_outlier"][0]
+    fields = next(w[1] for w in warnings if w[0] == "cost.run_outlier")
     assert fields["total_cost_usd"] == 21.0
     assert "num_turns" not in fields
     assert "usd_per_turn" not in fields
@@ -502,6 +502,6 @@ def test_717_zero_turn_run_logs_turns_without_dividing(monkeypatch) -> None:
     warnings = _capture_outlier(monkeypatch, _outlier_settings())
     _check_run_cost_outlier(_claude_usage(cost=21.0, num_turns=0))
 
-    fields = [w[1] for w in warnings if w[0] == "cost.run_outlier"][0]
+    fields = next(w[1] for w in warnings if w[0] == "cost.run_outlier")
     assert fields["num_turns"] == 0
     assert "usd_per_turn" not in fields
