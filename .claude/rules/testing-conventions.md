@@ -66,8 +66,11 @@ Integration tests are automated via Telegram MCP tools by Claude Code during the
 | Codex CLI | `4929463515` | `-4929463515` |
 | OpenCode | `5200822877` | `-5200822877` |
 | Pi | `5156256333` | `-5156256333` |
-| Gemini CLI | `5207762142` | `-5207762142` |
-| AMP CLI | `5230875989` | `-5230875989` |
+| Gemini CLI ⚠️ deprecated | `5207762142` | `-5207762142` |
+| AMP CLI ⚠️ deprecated | `5230875989` | `-5230875989` |
+
+The two deprecated chats are **not** part of any required tier — both engines are
+non-functional upstream and cannot pass U1. Use them for opt-in spot checks only.
 
 ### Pattern
 

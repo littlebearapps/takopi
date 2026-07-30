@@ -46,6 +46,27 @@ def _resolve_thread(tid: int) -> str | None:
     return _THREAD_REGISTRY.get(tid)
 
 
+# AMP exits rc=0 while printing fatal errors to stderr — notably the
+# `426 This version of Amp is no longer supported. Run `amp update`` refusal of
+# out-of-date clients. Callers here only branch on a non-zero return code, so a
+# refused `threads list` would parse empty stdout and render "No AMP threads
+# found" instead of the real reason. These markers promote such an exit to a
+# failure so the user sees AMP's own message (and the matching error hint).
+_AMP_FATAL_STDERR_MARKERS = (
+    "no longer supported",
+    "unexpected error inside amp",
+    "error:",
+)
+
+
+def _is_amp_stderr_failure(stderr: str) -> bool:
+    """True when stderr carries a fatal AMP error despite a zero exit code."""
+    if not stderr.strip():
+        return False
+    lowered = stderr.lower()
+    return any(marker in lowered for marker in _AMP_FATAL_STDERR_MARKERS)
+
+
 async def _run_amp_command(*args: str) -> tuple[int, str, str]:
     """Run an amp CLI command and return (returncode, stdout, stderr)."""
     amp_path = shutil.which("amp")
@@ -55,11 +76,12 @@ async def _run_amp_command(*args: str) -> tuple[int, str, str]:
         [amp_path, *args],
         check=False,
     )
-    return (
-        result.returncode,
-        result.stdout.decode("utf-8", errors="replace"),
-        result.stderr.decode("utf-8", errors="replace"),
-    )
+    stdout = result.stdout.decode("utf-8", errors="replace")
+    stderr = result.stderr.decode("utf-8", errors="replace")
+    returncode = result.returncode
+    if returncode == 0 and _is_amp_stderr_failure(stderr):
+        returncode = 1
+    return returncode, stdout, stderr
 
 
 def _parse_thread_table(stdout: str) -> list[dict]:

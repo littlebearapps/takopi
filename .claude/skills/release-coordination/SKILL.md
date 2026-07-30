@@ -198,7 +198,7 @@ journalctl --user -u untether-dev -f
 | Release type | Required tiers | Time |
 |---|---|---|
 | **Patch** | Tier 7 (command smoke) + Tier 1 (affected engine + Claude) + relevant Tier 6 (stress) | ~30 min |
-| **Minor** | Tier 7 + Tier 1 (all 6 engines) + Tier 2 (Claude interactive) + relevant Tier 3-4 + Tier 6 + upgrade path | ~75 min |
+| **Minor** | Tier 7 + Tier 1 (all 4 supported engines) + Tier 2 (Claude interactive) + relevant Tier 3-4 + Tier 6 + upgrade path | ~75 min |
 | **Major** | ALL tiers (1-7), ALL engines, full upgrade path testing | ~120 min |
 
 ### What to focus on per change type

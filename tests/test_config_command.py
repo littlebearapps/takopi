@@ -885,6 +885,48 @@ class TestEngine:
         assert "config:ag:opencode" in data
 
     @pytest.mark.anyio
+    async def test_engine_page_marks_deprecated_engines(self, tmp_path):
+        """Deprecated engines stay selectable but carry a warning glyph and an
+        explanatory line — they are not hidden or blocked."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="ag",
+            text="config:ag",
+            config_path=state_path,
+            engine_ids=("claude", "gemini", "amp"),
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        labels = _buttons_labels(msg)
+        assert any("gemini \u26a0\ufe0f" in label for label in labels)
+        assert any("amp \u26a0\ufe0f" in label for label in labels)
+        # claude must NOT be marked
+        assert not any("claude \u26a0\ufe0f" in label for label in labels)
+        # still selectable
+        data = _buttons_data(msg)
+        assert "config:ag:gemini" in data
+        assert "config:ag:amp" in data
+        # explanatory line present
+        assert "deprecated" in msg.text.lower()
+
+    @pytest.mark.anyio
+    async def test_engine_page_no_deprecation_notice_when_none_present(self, tmp_path):
+        """A host with only supported engines sees no deprecation copy."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="ag",
+            text="config:ag",
+            config_path=state_path,
+            engine_ids=("claude", "codex"),
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "deprecated" not in msg.text.lower()
+        assert not any("\u26a0\ufe0f" in label for label in _buttons_labels(msg))
+
+    @pytest.mark.anyio
     async def test_engine_set_returns_home(self, tmp_path):
         """Setting an engine returns to home page."""
         state_path = tmp_path / "prefs.json"

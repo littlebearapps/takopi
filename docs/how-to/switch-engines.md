@@ -11,8 +11,6 @@ Prefix the first non-empty line with an engine directive:
 /claude shrink and store artifacts forever
 /opencode hide their paper until they reply
 /pi render a diorama of this timeline
-/gemini analyse the codebase architecture
-/amp review recent changes
 ```
 
 Directives are only parsed at the start of the first non-empty line.
@@ -45,7 +43,17 @@ Selection precedence (highest to lowest): resume token → `/<engine-id>` direct
 ## Engine installation
 
 Untether shells out to engine CLIs. Install them and make sure they’re on your `PATH`
-(`codex`, `claude`, `opencode`, `pi`, `gemini`, `amp`). Authentication is handled by each CLI.
+(`codex`, `claude`, `opencode`, `pi`). Authentication is handled by each CLI.
+
+!!! warning "Deprecated engines"
+
+    The `gemini` and `amp` directives still work, but both engines are
+    **deprecated** and targeted for removal in 0.36.0. Gemini CLI no longer
+    authenticates individual or free Google accounts (upstream end-of-life,
+    18 June 2026 — use [Antigravity CLI](https://antigravity.google) instead),
+    and Untether's Amp integration is unmaintained. See
+    [deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines)
+    in the README.
 
 ## Feature differences
 

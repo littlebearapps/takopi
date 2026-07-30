@@ -1,6 +1,6 @@
 # Untether
 
-Telegram bridge for Claude Code, Codex, OpenCode, Pi, Gemini CLI, Amp, and other agent CLIs. Control your coding agents from anywhere — walking the dog, watching footy, at a friend's place.
+Telegram bridge for Claude Code, Codex, OpenCode, Pi, and other agent CLIs (Gemini CLI and Amp are deprecated — see below). Control your coding agents from anywhere — walking the dog, watching footy, at a friend's place.
 
 **Repo**: [littlebearapps/untether](https://github.com/littlebearapps/untether)
 **Based on**: [banteg/takopi](https://github.com/banteg/takopi) (upstream)
@@ -40,7 +40,7 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **Agent-initiated file delivery (outbox)** — agents write files to `.untether-outbox/` during a run; Untether sends them as Telegram documents on completion with `📎` captions; deny-glob security, size limits, file count cap, auto-cleanup; `[transports.telegram.files]` config
 - **Progress persistence** — active progress messages persisted to `active_progress.json`; on restart, orphan messages edited to "⚠️ interrupted by restart" with keyboard removed
 - **Resume line formatting** — visual separation with blank line and ↩️ prefix in final message footer
-- **`/continue`** — cross-environment resume; pick up the most recent CLI session from Telegram using each engine's native continue flag (`--continue`, `resume --last`, `--resume latest`); supported for Claude, Codex, OpenCode, Pi, Gemini (not AMP)
+- **`/continue`** — cross-environment resume; pick up the most recent CLI session from Telegram using each engine's native continue flag (`--continue`, `resume --last`, `--resume latest`); supported for Claude, Codex, OpenCode, Pi (Gemini deprecated; not AMP)
 - **Timezone-aware cron triggers** — per-cron `timezone` or global `default_timezone` with IANA names (e.g. `Australia/Melbourne`); DST-aware via `zoneinfo`; invalid names rejected at config parse time
 - **Hot-reload trigger configuration** — editing `untether.toml` applies cron/webhook changes immediately without restart; `TriggerManager` holds mutable state that the cron scheduler and webhook server reference at runtime; `handle_reload()` re-parses `[triggers]` on config file change
 - **Hot-reload Telegram bridge settings** — `voice_transcription` (incl. the #638 `voice_transcription_language` ISO-639-1 hint and the #691/#703 `voice_transcription_prompt` vocabulary bias, which ships a product-generic default), file transfer, `allowed_user_ids`, timing, and `show_resume_line` settings reload without restart; `TelegramBridgeConfig` unfrozen (slots kept) with `update_from()` wired into `handle_reload()`; restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`) still warn
@@ -53,6 +53,28 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **Master trigger pause toggle (#294)** — `TriggerManager.pause()` / `resume()` / `is_paused` gate cron firing and webhook dispatch globally; webhook server returns `503 triggers paused` (with `Retry-After: 60`); `/health` endpoint reflects paused state. Wired into `/config` two ways: home-page button row (only when triggers configured) and a dedicated `📡 Triggers` page (`config:tg`) showing counts + Pause/Resume button. `/ping` switches to `⏸ triggers paused: … (suspended)` while paused. Pause is in-memory only — restart auto-resumes (safe default)
 
 See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` for implementation details.
+
+## Deprecated engines (Gemini CLI, AMP)
+
+Both are **deprecated** and targeted for **removal in 0.36.0**. They still load and
+run; they are not supported.
+
+- **`gemini`** — Google ended Gemini CLI support for individual and free accounts on
+  **2026-06-18**, directing users to Antigravity CLI. On those accounts it fails with
+  `IneligibleTierError: This client is no longer supported` — and exits **`rc=0`**, so
+  a failed run looks empty. Enterprise / Google Cloud licences may still work, unverified.
+- **`amp`** — integration unmaintained. AMP remotely refuses out-of-date clients
+  (`426 This version of Amp is no longer supported`), also at **`rc=0`**. Decision is
+  about our integration, not AMP itself. The AMP-only `/threads` command is deprecated
+  alongside it.
+
+**Working rule:** when a cross-engine sweep breaks either runner, `xfail`/`skip` the
+test — do NOT fix the runner. Security fixes still apply. Both are excluded from every
+integration-test tier. Full rule in `.claude/rules/runner-development.md` → "Deprecated
+engines — sweep exemption".
+
+Antigravity CLI (#558) is a **new engine**, not a `gemini` rename — it must not reuse
+the `gemini` engine id.
 
 ## Architecture
 
@@ -72,8 +94,8 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 | File | Purpose |
 |------|---------|
 | `runners/claude.py` | Claude Code runner, interactive features |
-| `runners/gemini.py` | Gemini CLI runner |
-| `runners/amp.py` | AMP CLI runner (Sourcegraph) |
+| `runners/gemini.py` | Gemini CLI runner (⚠️ deprecated) |
+| `runners/amp.py` | AMP CLI runner (Sourcegraph) (⚠️ deprecated) |
 | `runner_bridge.py` | Connects runners to Telegram presenter, injects agent preamble, auto-continue with signal death suppression, empty-resume quarantine-and-fresh recovery |
 | `session_quarantine.py` | Persistent QuarantineStore (`session_quarantine.json`): poisoned-session markers, forced-teardown quarantine, resume divert (#631/#632) |
 | `cost_tracker.py` | Per-run/daily cost tracking and budget alerts |
@@ -191,7 +213,7 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 
 ## Tests
 
-3148 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
+3161 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
 
 Key test files:
 
@@ -204,6 +226,8 @@ Key test files:
 - `test_export_command.py` — 16 tests: session event recording, markdown/JSON export formatting, usage integration, session trimming
 - `test_browse_command.py` — 39 tests: path registry, directory listing, file preview, inline keyboard buttons, project-aware root resolution, security (path traversal)
 - `test_meta_line.py` — 70 tests: model name shortening (incl. Claude 5 major-only IDs, the `fable` family and the `[1m]` context marker, #688), meta line formatting, ProgressTracker meta storage/snapshot, footer ordering (context/meta/resume)
+- `test_error_hints.py` — end-of-life/unsupported-client hints ordered ahead of the generic `invalid_request_error` pattern, so Gemini's `IneligibleTierError` and AMP's `426` (both emitted at `rc=0`) surface as failures rather than empty answers
+- `test_threads_command.py` — `/threads` (AMP-only, deprecated): thread registry, formatting, callback-data bounds, plus `rc=0` fatal-stderr promotion so an AMP `426` refusal no longer renders as "No AMP threads found"
 - `test_runner_utils.py` — 43 tests: error formatting helpers, drain_stderr capture, enriched error messages, stderr sanitisation
 - `test_shutdown.py` — 19 tests: shutdown state transitions, idempotency, reset, evidence-gated drain-timeout selection, self-restart argv matcher + descendant evidence scan (#690)
 - `test_drain_notify.py` — 15 tests: drain start/timeout notices, per-chat dedupe, forum-topic thread routing + (channel, thread) dedupe (#665)
@@ -212,7 +236,7 @@ Key test files:
 - `test_cooldown_bypass.py` — 27 tests: outline gate (hold-open with outline, auto-deny without), plan-input gate on plan-file CLIs (#659), no-text auto-deny, hold-open outline flow (#570 retired the time-based cooldown escalation)
 - `test_verbose_progress.py` — 39 tests: format_verbose_detail() for each tool type, MarkdownFormatter verbose mode, compact regression
 - `test_verbose_command.py` — 7 tests: /verbose toggle on/off/clear, backend id
-- `test_config_command.py` — 240 tests: home page, plan mode/ask mode/verbose/engine/listen/model/reasoning sub-pages, toggle actions, callback vs command routing, button layout, engine-aware visibility, default resolution
+- `test_config_command.py` — 242 tests: home page, plan mode/ask mode/verbose/engine/listen/model/reasoning sub-pages, toggle actions, callback vs command routing, button layout, engine-aware visibility, default resolution, deprecated-engine `⚠️` glyph + notice (still selectable, never hidden)
 - `test_pi_compaction.py` — 6 tests: compaction start/end, aborted, no tokens, sequence
 - `test_proc_diag.py` — 56 tests: format_diag, is_cpu_active, collect_proc_diag (Linux /proc reads), ProcessDiag defaults, macOS ps backend (TIME parser, process table, tree CPU, dispatch — #689), read_cmdline_argv
 - `test_exec_runner.py` — 50 tests: event tracking (event_count, recent_events ring buffer, PID in StartedEvent meta), JsonlStreamState defaults, watchdog approval-pending discriminator (registry probe first, non-positional ring scan fallback, same-tick `rate_limit_event`, #697)

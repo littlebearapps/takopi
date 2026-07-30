@@ -28,14 +28,18 @@
 | Release type | Required integration test tiers | Time |
 |---|---|---|
 | **Patch** | Tier 7 (command smoke) + Tier 1 (affected engine + Claude) + relevant Tier 6 (stress) | ~30 min |
-| **Minor** | Tier 7 + Tier 1 (all 6 engines) + Tier 2 (Claude interactive) + Tier 3 (transport, if changed) + Tier 4 (overrides, if changed) + Tier 6 + upgrade path | ~75 min |
-| **Major** | ALL tiers (1-7), ALL engines, full upgrade path testing | ~120 min |
+| **Minor** | Tier 7 + Tier 1 (all 4 supported engines) + Tier 2 (Claude interactive) + Tier 3 (transport, if changed) + Tier 4 (overrides, if changed) + Tier 6 + upgrade path | ~75 min |
+| **Major** | ALL tiers (1-7), all supported engines, full upgrade path testing | ~120 min |
+
+Deprecated engines (`gemini`, `amp`) are **excluded from every tier** — both are
+currently non-functional upstream and cannot pass U1. See
+[`runner-development.md`](./runner-development.md) → "Deprecated engines — sweep exemption".
 
 **NEVER skip integration testing.** Unit tests alone are insufficient — production bugs consistently slip through areas only exercisable via live Telegram interaction.
 
 **ALWAYS use `@untether_dev_bot`** (dev service) for initial integration testing. NEVER use `@hetz_lba1_bot` (staging) for dev testing — use `@untether_dev_bot` first. Stage rc versions on `@hetz_lba1_bot` only after dev integration tests pass.
 
-Integration tests are automated via Telegram MCP tools (`send_message`, `get_history`, `list_inline_buttons`, `press_inline_button`, `reply_to_message`). Claude Code sends test prompts to the 6 `ut-dev:` engine chats, reads back responses, and verifies expected behaviour. See `docs/reference/integration-testing.md` for chat IDs, workflow, and test details.
+Integration tests are automated via Telegram MCP tools (`send_message`, `get_history`, `list_inline_buttons`, `press_inline_button`, `reply_to_message`). Claude Code sends test prompts to the 4 supported `ut-dev:` engine chats, reads back responses, and verifies expected behaviour. See `docs/reference/integration-testing.md` for chat IDs, workflow, and test details.
 
 ### Pre-rollout integration test attestation
 

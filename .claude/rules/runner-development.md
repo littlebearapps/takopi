@@ -61,6 +61,44 @@ Do NOT construct `StartedEvent`, `ActionEvent`, `CompletedEvent` dataclasses dir
 6. Add reference docs in `docs/reference/runners/myengine/`
 7. Add tests mirroring the Codex suite's patterns (`tests/test_codex_runner_helpers.py`, `tests/test_codex_schema.py`, `tests/test_codex_tool_result_summary.py`)
 
+## Deprecated engines — sweep exemption
+
+`gemini` and `amp` are **deprecated** and targeted for removal in 0.36.0. Both
+are non-functional on the maintainer's accounts today (Gemini: upstream EOL for
+individual accounts 2026-06-18; AMP: remote `426` refusal of out-of-date
+clients), and neither has observed Untether usage.
+
+**The rule that matters for day-to-day work:** cross-engine sweeps mechanically
+touch all six runners — `stream_end_events` threading (#565),
+`manage_subprocess` (#599), `_classify_jsonl_event` (#322), `build_args`. When a
+sweep breaks `gemini` or `amp`:
+
+> **`xfail`/`skip` the affected test — do NOT fix the runner.**
+
+Mark it with a comment pointing at the removal issue. This is the whole point of
+the deprecation: without this rule the posture buys nothing, because a
+required-green `test_amp_runner.py` drags the fix back onto the critical path.
+
+What still applies to both:
+
+- Security fixes (credential handling, command injection) — always
+- Doc accuracy fixes
+- Mechanical inclusion in a sweep is fine when it's free; only the *repair* is exempt
+
+What does NOT apply:
+
+- New features or parity catch-up
+- Required integration testing (both dropped from the Tier 1 matrix — see `docs/reference/integration-testing.md`)
+- Investigation of upstream protocol changes
+
+Do not delete their tests before the removal release — they run against fake
+CLIs, cost nothing, and deleting ~100 tests would flatter the 80% coverage gate
+while reducing compatibility coverage.
+
+Antigravity CLI ([#558](https://github.com/littlebearapps/untether/issues/558))
+is a **new engine**, not a `gemini` rename — it must not reuse the `gemini`
+engine id, because its auth, flags, and session semantics differ.
+
 ## After changes
 
 ```bash

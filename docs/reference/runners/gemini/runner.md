@@ -1,3 +1,22 @@
+> ## ⚠️ Status: deprecated
+>
+> The `gemini` engine is **deprecated** and targeted for **removal in 0.36.0**.
+>
+> Google ended Gemini CLI support for individual and free accounts on
+> **18 June 2026**, directing users to [Antigravity CLI](https://antigravity.google).
+> On an individual account the CLI now exits with
+> `IneligibleTierError: This client is no longer supported` — note it exits
+> **`rc=0`**, so a failed run can look like an empty one.
+>
+> Enterprise / Google Cloud licences may still work, but Untether no longer
+> verifies this and does no further work on this runner beyond security fixes.
+> Cross-engine sweeps skip it (see
+> [`runner-development.md`](../../../../.claude/rules/runner-development.md)).
+>
+> Antigravity CLI is tracked separately as a new engine in
+> [#558](https://github.com/littlebearapps/untether/issues/558) — it is a
+> distinct tool, not a rename, and will not reuse the `gemini` engine id.
+
 Below is the implementation spec for the **Gemini CLI** runner shipped in Untether.
 
 ---

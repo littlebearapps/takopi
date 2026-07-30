@@ -71,7 +71,19 @@ npm install -g @mariozechner/pi-coding-agent
 
 Pi can authenticate via a provider login or use API billing. You can log in with Anthropic (Claude subscription), OpenAI (ChatGPT subscription), GitHub Copilot, Google Cloud Code Assist (Gemini CLI), or Antigravity (Gemini 3, Claude, GPT-OSS), or choose API billing instead.
 
-### Gemini CLI
+### Gemini CLI ⚠️ deprecated
+
+!!! warning "Deprecated — don't install for new setups"
+
+    Google ended Gemini CLI support for **individual and free accounts on
+    18 June 2026**, directing users to [Antigravity CLI](https://antigravity.google).
+    On those accounts the CLI now fails to authenticate outright
+    (`IneligibleTierError`), and it exits with status 0 while doing so — so runs
+    look empty rather than failed. Enterprise / Google Cloud licences may still
+    work, but Untether no longer verifies this.
+
+    The `gemini` engine is targeted for **removal in 0.36.0**. Antigravity CLI is
+    planned as a separate engine ([#558](https://github.com/littlebearapps/untether/issues/558)).
 
 ```sh
 npm install -g @google/gemini-cli
@@ -82,7 +94,17 @@ Gemini CLI uses Google AI Studio or Vertex AI for authentication. Run `gemini` a
 !!! tip "Headless trust"
     Untether runs Gemini with `--skip-trust` by default (v0.35.3+, [#471](https://github.com/littlebearapps/untether/issues/471)) so projects outside `~/.gemini/trustedFolders.json` work in headless mode. Set `[gemini] skip_trust = false` in `untether.toml` if you'd rather enforce Gemini's project-local trust gate.
 
-### AMP
+### AMP ⚠️ deprecated
+
+!!! warning "Deprecated — don't install for new setups"
+
+    Untether's AMP integration is **no longer maintained** and is targeted for
+    **removal in 0.36.0**. AMP remotely refuses clients it considers out of date
+    (`426 This version of Amp is no longer supported`) and exits with status 0
+    while doing so, so a refused run looks empty. Untether does not track AMP's
+    update cadence, so a working setup can stop working without notice.
+
+    This is a decision about our integration, not about AMP itself.
 
 ```sh
 npm install -g @sourcegraph/amp
