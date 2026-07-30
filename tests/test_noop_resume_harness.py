@@ -486,3 +486,63 @@ async def test_667_cancel_midflight_captures_proc_returncode(
     # exact case the auto-continue guard must recognise and could not when the
     # return code was None.
     assert _is_signal_death(rc), f"expected a signal death, got rc={rc}"
+
+
+@pytest.mark.anyio
+async def test_harness_trailing_user_frame_after_result_sets_saw_result(
+    monkeypatch, quarantine_store
+) -> None:
+    """#716: a healthy run whose CLI emits a trailing ``user`` (tool_result)
+    frame after the terminal ``result``.
+
+    Drives the REAL ClaudeRunner pipeline so the assertion is about observed
+    parser behaviour, not about what the code is believed to do. Two things
+    must hold:
+
+    * ``saw_result`` is True — the latch fires on the terminal frame, which
+      is what ``_should_auto_continue`` now reads;
+    * the auto-continue salvage does NOT fire on this run.
+
+    ``last_event_type`` is asserted loosely on purpose: whether the trailing
+    frame lands depends on whether the reader has already stopped at the
+    ``result``, and the point of #716's fix is that the answer to
+    "did this run reach its result?" must no longer depend on that.
+    """
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "trailing_user_after_result")
+    monkeypatch.setenv("FAKE_CLAUDE_LINGER_S", "0")
+
+    transport = FakeTransport()
+    runner = _harness_runner()
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await _run_bounded(
+            handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(
+                    channel_id=456, message_id=20, text="do the thing"
+                ),
+                resume_token=None,
+            )
+        )
+
+    stream = runner.current_stream
+    assert stream is not None
+    # The latch fired on the terminal frame and nothing after it cleared it.
+    assert stream.saw_result is True, (
+        "#716: saw_result must latch on the terminal result frame"
+    )
+    # A healthy, answer-delivered run must never be auto-continued.
+    assert not any(r.get("event") == "session.auto_continue" for r in logs), (
+        "#716: auto-continue salvage fired on a healthy completed run"
+    )
+    # session.summary carries the latch so log-side auditing can tell a
+    # healthy-with-trailing-frame run from a stuck-after-tool_result one.
+    summaries = [r for r in logs if r.get("event") == "session.summary"]
+    assert summaries, "expected a session.summary line"
+    assert summaries[-1]["saw_result"] is True

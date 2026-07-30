@@ -146,6 +146,11 @@ _CODEX_TOOL_ITEM_TYPES = frozenset(
 )
 _OPENCODE_TOOL_STATUSES = frozenset({"completed", "error"})
 
+# #716: the terminal frame of a run. Latched onto ``saw_result`` so
+# "did this run reach its result?" is answerable independently of the
+# running ``last_event_type`` — see ``JsonlStreamState.saw_result``.
+_RESULT_EVENT_TYPE = "result"
+
 # #502: control-channel traffic is stdin/stdout permission-flow (Claude
 # control_request → Untether stdin control_response, and parent-initiated
 # requests like mcp_status). Skip when computing last_event_type so the
@@ -369,6 +374,28 @@ class JsonlStreamState:
     last_stdout_at: float = 0.0
     last_event_type: str | None = None
     last_event_tool: str | None = None
+    # #716: monotonic latch — True once a ``result`` frame has been parsed.
+    #
+    # ``last_event_type`` is a *running* value overwritten by every non-
+    # control-channel frame, so it answers "what was the last frame we saw?"
+    # and NOT "did this run reach its result?". Those come apart in practice:
+    # 106 healthy (``ok=True``, uncancelled) Claude runs on nsd logged
+    # ``session.summary last_event_type=user``, which is the exact value
+    # ``_should_auto_continue`` treats as its salvage trigger.
+    #
+    # Note the mechanism is NOT a frame arriving after the terminal
+    # ``result`` — that is measurably impossible on this path, because the
+    # ``result`` frame's CompletedEvent sets ``did_emit_completed`` and both
+    # ``_iter_jsonl_events`` overrides break out of the read loop
+    # immediately (verified against the real ClaudeRunner with the
+    # ``trailing_user_after_result`` fake-CLI scenario: the trailing frame
+    # does not even reach ``recent_events``). A ``user`` value on a completed
+    # run therefore means the result frame never landed on THIS stream
+    # object. Whatever the upstream reason, the discriminator the salvage
+    # predicate needs is "was a result parsed", which is what this latch
+    # records — set-only, so it states a fact about the run rather than
+    # about frame ordering.
+    saw_result: bool = False
     event_count: int = 0
     recent_events: deque[tuple[float, str]] = field(
         default_factory=lambda: deque(maxlen=10)
@@ -968,6 +995,10 @@ class JsonlSubprocessRunner(BaseRunner):
             if etype not in _CONTROL_CHANNEL_EVENT_TYPES:
                 stream.last_event_type = etype
                 stream.last_event_tool = etool
+            # #716: latch the terminal frame separately from the running
+            # ``last_event_type``. Set-only — never cleared.
+            if etype == _RESULT_EVENT_TYPE:
+                stream.saw_result = True
             label = f"tool:{etool}" if etool else etype
             stream.recent_events.append((now, label))
             # Stuck-after-tool_result tracking (#322). The latch persists across
