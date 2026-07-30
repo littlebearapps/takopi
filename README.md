@@ -90,10 +90,10 @@ The wizard offers three **workflow modes** — pick the one that fits:
 - 🔐 **Interactive permissions** — approve plan transitions and answer clarifying questions with inline option buttons; tools auto-execute, and "Pause & Outline Plan" holds the session open while you review the plan outline before approving
 - 📋 **Plan mode** — toggle per chat with `/planmode`; choose full manual approval, auto-approved transitions, or no plan phase
 - 📁 **Projects and worktrees** — register repos with `untether init`, target with `/myproject @feat/thing`, run branches in isolated worktrees in parallel
-- 💰 **Cost and usage tracking** — run agents remotely with confidence; per-run and daily budgets, `/usage` breakdowns, and optional auto-cancel keep spending visible
+- 💰 **Cost and usage tracking** — run agents remotely with confidence; per-run and daily budgets, `/usage` breakdowns, and optional auto-cancel keep spending visible. A per-run outlier alert fires even with no budget configured, so an expensive run can't pass unnoticed
 - 💡 **Actionable error hints** — friendly messages for API outages, rate limits, billing errors, and network failures with resume guidance
-- 🏷 **Model and mode metadata** — every completed message shows model with version, effort level, and permission mode (e.g. `🏷 opus 4.6 · medium · plan`) across all engines
-- 🎙️ **Voice notes** — hands full? Dictate tasks instead of typing; Untether transcribes via a configurable Whisper-compatible endpoint
+- 🏷 **Model and mode metadata** — every completed message shows model with version, effort level, and permission mode (e.g. `🏷 opus 5 · medium · plan`) across all engines
+- 🎙️ **Voice notes** — hands full? Dictate tasks instead of typing; Untether transcribes via a configurable Whisper-compatible endpoint, with a vocabulary bias so tool and project names survive transcription
 - 🔄 **Cross-environment resume** — start a session in your terminal, pick it up from Telegram with `/continue`; works with Claude Code, Codex, OpenCode, Pi, and Gemini ([guide](docs/how-to/cross-environment-resume.md))
 - 📎 **File transfer** — upload files to your repo with `/file put`, download with `/file get`; agents can also deliver files automatically by writing to `.untether-outbox/` during a run — sent as Telegram documents on completion, with whole directories optionally bundled as a zip (`outbox_deliver_directories = "zip"`)
 - 🛡️ **Graceful recovery** — orphan progress messages cleaned up on restart; stall detection with CPU-aware diagnostics; auto-continue for Claude Code sessions that exit prematurely

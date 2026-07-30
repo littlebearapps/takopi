@@ -59,7 +59,7 @@ Do NOT construct `StartedEvent`, `ActionEvent`, `CompletedEvent` dataclasses dir
 4. Export `BACKEND = EngineBackend(id="myengine", build_runner=..., cli_cmd="myengine")`
 5. Register in `pyproject.toml` entry points: `myengine = "untether.runners.myengine:BACKEND"`
 6. Add reference docs in `docs/reference/runners/myengine/`
-7. Add tests mirroring `tests/test_codex_runner.py` patterns
+7. Add tests mirroring the Codex suite's patterns (`tests/test_codex_runner_helpers.py`, `tests/test_codex_schema.py`, `tests/test_codex_tool_result_summary.py`)
 
 ## After changes
 
