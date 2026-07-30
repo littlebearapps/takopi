@@ -364,3 +364,144 @@ def test_run_outlier_fails_open_on_settings_error(monkeypatch) -> None:
 
     assert _check_run_cost_outlier({"total_cost_usd": 99.0}) is None
     assert [w for w in warnings if w[0] == "cost.run_outlier_check_failed"]
+
+
+# ---------------------------------------------------------------------------
+# #717: cost.run_outlier carries the SHAPE of the spend, not just the amount
+# ---------------------------------------------------------------------------
+
+
+def _claude_usage(
+    *,
+    cost: float,
+    num_turns: int,
+    duration_api_ms: int = 60_000,
+    input_tokens: int = 1_200,
+    output_tokens: int = 900,
+    cache_read: int = 40_000,
+    cache_creation: int = 5_000,
+) -> dict:
+    """A usage payload shaped like `_usage_payload` in runners/claude.py."""
+    return {
+        "total_cost_usd": cost,
+        "duration_ms": duration_api_ms + 1_000,
+        "duration_api_ms": duration_api_ms,
+        "num_turns": num_turns,
+        "subtype": "success",
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_creation,
+        },
+    }
+
+
+def test_717_outlier_log_distinguishes_context_bloat_from_big_task(monkeypatch) -> None:
+    """The two runs from the issue: a 2-turn $20.50 and a 40-turn $19.58.
+
+    They fired in the same 20-minute window, on the same host, in the same
+    session — and called for opposite operator responses. From the #702 log
+    line alone they were indistinguishable, because the only number in it was
+    the dollar amount.
+    """
+    from untether.runner_bridge import _check_run_cost_outlier
+
+    # $15 threshold so both of the issue's runs clear it, as they did on the
+    # host that reported them ($19.58 sits just under the $20 default).
+    warnings = _capture_outlier(monkeypatch, _outlier_settings(warn_run_above_usd=15.0))
+    _check_run_cost_outlier(
+        _claude_usage(cost=20.50, num_turns=2, cache_read=900_000, input_tokens=1_100)
+    )
+    _check_run_cost_outlier(_claude_usage(cost=19.58, num_turns=40))
+
+    events = [w[1] for w in warnings if w[0] == "cost.run_outlier"]
+    assert len(events) == 2
+    bloat, big_task = events
+
+    # The discriminator: near-identical cost, an order of magnitude apart in
+    # turns — and now visibly so.
+    assert bloat["num_turns"] == 2
+    assert big_task["num_turns"] == 40
+    assert bloat["usd_per_turn"] > big_task["usd_per_turn"] * 10
+
+    # Context bloat is self-evident from the cache-read to input ratio.
+    assert bloat["cache_read_input_tokens"] == 900_000
+    assert bloat["input_tokens"] == 1_100
+
+    # Duration separates "slow and expensive" from "fast and expensive".
+    assert bloat["duration_api_ms"] == 60_000
+
+
+def test_717_outlier_keeps_the_702_fields(monkeypatch) -> None:
+    """Additive only — #702's fields and the chat notice are unchanged."""
+    from untether.runner_bridge import _check_run_cost_outlier
+
+    warnings = _capture_outlier(monkeypatch, _outlier_settings())
+    text = _check_run_cost_outlier(_claude_usage(cost=25.56, num_turns=40))
+
+    fields = [w[1] for w in warnings if w[0] == "cost.run_outlier"][0]
+    assert fields["total_cost_usd"] == 25.56
+    assert fields["threshold_usd"] == 20.0
+    assert fields["budget_configured"] is False
+    assert fields["show_api_cost"] is False
+    assert fields["show_subscription_usage"] is True
+    assert text is not None and "$25.56" in text
+
+
+def test_717_outlier_omits_absent_shape_fields(monkeypatch) -> None:
+    """A usage dict carrying only the cost (a non-Claude engine, or a result
+    with no token block) must still log — with the shape fields simply
+    absent rather than logged as None, so a log consumer can filter on
+    presence."""
+    from untether.runner_bridge import _check_run_cost_outlier
+
+    warnings = _capture_outlier(monkeypatch, _outlier_settings())
+    _check_run_cost_outlier({"total_cost_usd": 30.0})
+
+    fields = [w[1] for w in warnings if w[0] == "cost.run_outlier"][0]
+    assert fields["total_cost_usd"] == 30.0
+    for absent in (
+        "num_turns",
+        "usd_per_turn",
+        "duration_api_ms",
+        "input_tokens",
+        "cache_read_input_tokens",
+    ):
+        assert absent not in fields
+
+
+def test_717_outlier_survives_a_malformed_token_block(monkeypatch) -> None:
+    """The shape helper is on the delivery path — a junk `usage` sub-dict
+    must never take down the run."""
+    from untether.runner_bridge import _check_run_cost_outlier
+
+    warnings = _capture_outlier(monkeypatch, _outlier_settings())
+    text = _check_run_cost_outlier(
+        {
+            "total_cost_usd": 21.0,
+            "num_turns": "seven",  # wrong type
+            "duration_api_ms": None,
+            "usage": "not-a-dict",
+        }
+    )
+
+    fields = [w[1] for w in warnings if w[0] == "cost.run_outlier"][0]
+    assert fields["total_cost_usd"] == 21.0
+    assert "num_turns" not in fields
+    assert "usd_per_turn" not in fields
+    assert "input_tokens" not in fields
+    assert text is not None
+
+
+def test_717_zero_turn_run_logs_turns_without_dividing(monkeypatch) -> None:
+    """A 0-turn result (the #596 empty-resume shape) must not raise on the
+    derived per-turn figure."""
+    from untether.runner_bridge import _check_run_cost_outlier
+
+    warnings = _capture_outlier(monkeypatch, _outlier_settings())
+    _check_run_cost_outlier(_claude_usage(cost=21.0, num_turns=0))
+
+    fields = [w[1] for w in warnings if w[0] == "cost.run_outlier"][0]
+    assert fields["num_turns"] == 0
+    assert "usd_per_turn" not in fields

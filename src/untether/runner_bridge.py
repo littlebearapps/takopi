@@ -895,6 +895,43 @@ def _warn_cost_visibility_gap(cost: float, settings: Any, budget_enabled: bool) 
     )
 
 
+def _run_shape_fields(usage: dict[str, Any], cost: float) -> dict[str, Any]:
+    """#717: the ``cost.run_outlier`` fields that explain a spend figure.
+
+    ``num_turns`` is the single highest-value discriminator; ``duration_api_ms``
+    separates "slow and expensive" from "fast and expensive"; the cache-read /
+    input token pair makes the context-bloat case self-evident (a high
+    cache-read-to-input ratio is the 2-turn/$20 signature). ``usd_per_turn``
+    is derived, but it is the number an operator reads first.
+
+    Every field is best-effort: engines other than Claude may populate a
+    different subset, so anything absent is simply omitted rather than logged
+    as ``None``. Never raises — the caller is on the delivery path.
+    """
+    fields: dict[str, Any] = {}
+    num_turns = usage.get("num_turns")
+    if isinstance(num_turns, int):
+        fields["num_turns"] = num_turns
+        if num_turns > 0:
+            fields["usd_per_turn"] = round(cost / num_turns, 4)
+    for key in ("duration_ms", "duration_api_ms"):
+        value = usage.get(key)
+        if isinstance(value, int):
+            fields[key] = value
+    tokens = usage.get("usage")
+    if isinstance(tokens, dict):
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ):
+            value = tokens.get(key)
+            if isinstance(value, int):
+                fields[key] = value
+    return fields
+
+
 def _check_run_cost_outlier(usage: dict[str, Any] | None) -> str | None:
     """#702: emit ``cost.run_outlier`` for any single run above the threshold,
     **regardless of whether a ``[cost_budget]`` is configured**, and return the
@@ -937,6 +974,15 @@ def _check_run_cost_outlier(usage: dict[str, Any] | None) -> str | None:
             budget_configured=budget_cfg.enabled,
             show_api_cost=footer.show_api_cost,
             show_subscription_usage=footer.show_subscription_usage,
+            # #717: the shape of the spend, not just its size. Without these
+            # a 2-turn $20.50 run and a 40-turn $19.58 run are identical in
+            # the log, and they call for opposite operator responses — the
+            # first says "this session's context has grown expensive, start
+            # a fresh one", the second says "big task, nothing to do".
+            # All of it already sits in the `usage` dict this function
+            # receives (`_usage_payload` in runners/claude.py); it was
+            # simply not forwarded.
+            **_run_shape_fields(usage, cost),
         )
         if not budget_cfg.notify_run_outlier:
             return None
