@@ -5116,6 +5116,7 @@ class TestShouldAutoContinue:
         auto_continued_count: int = 0,
         max_retries: int = 1,
         proc_returncode: int | None = 0,
+        saw_result: bool = False,
     ) -> bool:
         from untether.runner_bridge import _should_auto_continue
 
@@ -5127,6 +5128,7 @@ class TestShouldAutoContinue:
             auto_continued_count=auto_continued_count,
             max_retries=max_retries,
             proc_returncode=proc_returncode,
+            saw_result=saw_result,
         )
 
     def test_detects_bug_scenario(self):
@@ -5199,6 +5201,45 @@ class TestShouldAutoContinue:
         gets pointlessly re-spawned.
         """
         assert self._call(proc_returncode=1) is False
+
+    # ── #716: the trailing-frame case ──
+
+    def test_skips_when_result_was_seen(self):
+        """#716: a healthy run reporting `last_event_type=user`.
+
+        The shape the issue was filed on, and not a rare one: 106 healthy
+        (`ok=True`, uncancelled) Claude runs on nsd logged
+        `session.summary last_event_type=user`. Every other gate passes on
+        those, so before #716 the predicate returned True on finished runs
+        and only `final_delivery["sent"]` at the call site stopped a
+        spurious salvage re-spawn.
+        """
+        assert self._call(last_event_type="user", saw_result=True) is False
+
+    def test_still_fires_when_no_result_frame_arrived(self):
+        """The mitigation itself must survive the new gate.
+
+        Neither upstream defect emits a `result` — claude-code#34142 skips
+        the assistant continuation after a tool_result, #30333 never emits
+        ResultMessage with background subagents. So `saw_result=False` +
+        `last_event_type="user"` is precisely the cohort auto-continue
+        exists to salvage, and it must still be detected.
+        """
+        assert self._call(last_event_type="user", saw_result=False) is True
+
+    def test_result_latch_beats_every_other_eligible_gate(self):
+        """`saw_result` is sufficient on its own — no gate combination
+        can re-enable a salvage on a run that reached its result."""
+        assert (
+            self._call(
+                last_event_type="user",
+                saw_result=True,
+                proc_returncode=0,
+                auto_continued_count=0,
+                max_retries=5,
+            )
+            is False
+        )
 
 
 class TestIsSignalDeath:

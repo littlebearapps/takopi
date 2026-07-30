@@ -355,6 +355,7 @@ def _should_auto_continue(
     auto_continued_count: int,
     max_retries: int,
     proc_returncode: int | None = None,
+    saw_result: bool = False,
 ) -> bool:
     """Detect a Claude Code run that exited without processing its tool results.
 
@@ -386,10 +387,36 @@ def _should_auto_continue(
     for Claude it is now always populated (`runners/claude.py`, run_impl).
     14 days of fleet data showed 47/49 auto-continues at rc=0 and 2 at
     rc=143 — the latter being exactly the leak this gate now closes.
+
+    #716 — the ``a result frame would exclude the predicate entirely``
+    claim above was **assumed, never enforced**. It reads
+    ``last_event_type``, a running value that records the last frame seen
+    rather than whether the run reached its result, and the two come apart:
+    106 healthy (``ok=True``, uncancelled) Claude runs on nsd logged
+    ``last_event_type=user``, satisfying every gate here. Nothing but the
+    caller's ``final_delivery["sent"]`` check stopped a salvage re-spawn of
+    a finished run.
+
+    The claim is now enforced by ``saw_result``, a monotonic per-run latch
+    set when a ``result`` frame is parsed. That is the sound
+    discriminator for this predicate: neither upstream defect emits a
+    ``result`` at all (claude-code#34142 skips the assistant continuation
+    after a tool_result; #30333 never emits ResultMessage with background
+    subagents), so gating on it preserves both mitigations exactly while
+    excluding runs that finished.
+
+    Note what this does NOT claim: the trailing-frame mechanism #716
+    hypothesised is disproven — a frame after the terminal ``result``
+    cannot reach the stream, because the CompletedEvent breaks the read
+    loop (see ``JsonlStreamState.saw_result``). A ``user`` value on a
+    completed run means the result never landed on that stream object, and
+    the reason for that is tracked separately.
     """
     if cancelled:
         return False
     if engine != "claude":
+        return False
+    if saw_result:
         return False
     if last_event_type != "user":
         return False
@@ -3410,6 +3437,14 @@ async def run_runner_with_cancel(
         liveness_stalls=edits.stream.liveness_stalls if edits.stream else 0,
         peak_idle_seconds=round(edits._peak_idle, 1),
         last_event_type=edits.stream.last_event_type if edits.stream else None,
+        # #716: `last_event_type` alone cannot answer "did this run reach its
+        # result?" — a trailing frame overwrites it. Logging the latch makes
+        # `session.summary` self-describing for log-side auditing, so a
+        # `last_event_type=user` line can be read as healthy-with-trailing-
+        # frame rather than as a stuck-after-tool_result candidate.
+        saw_result=bool(getattr(edits.stream, "saw_result", False))
+        if edits.stream
+        else False,
         cancelled=outcome.cancelled,
         ok=outcome.completed.ok if outcome.completed else None,
         stall_suppressions=suppression_summary,
@@ -4499,9 +4534,17 @@ async def handle_message(
     _ac_resume = completed.resume or outcome.resume
     _ac_last_event = edits.stream.last_event_type if edits.stream else None
     _ac_proc_rc = edits.stream.proc_returncode if edits.stream else None
+    _ac_saw_result = bool(getattr(edits.stream, "saw_result", False))
     # #591: a run whose answer was already delivered can never need the
-    # auto-continue salvage (belt-and-braces — _should_auto_continue already
-    # excludes last_event_type == "result").
+    # auto-continue salvage.
+    # #716: this delivery check used to be described as "belt-and-braces"
+    # against a predicate that "already excludes last_event_type ==
+    # 'result'". That had it backwards — the predicate read a *running*
+    # value that says nothing about whether the run reached its result, so
+    # on the 106 nsd runs that ended `last_event_type=user` while healthy,
+    # `final_delivery["sent"]` was the ONLY thing holding the line. The
+    # predicate now discriminates on its own via `saw_result`; this stays
+    # as a genuine second gate, not a redundant one.
     if (
         ac_settings.enabled
         and not final_delivery["sent"]
@@ -4513,6 +4556,7 @@ async def handle_message(
             auto_continued_count=_auto_continued_count,
             max_retries=ac_settings.max_retries,
             proc_returncode=_ac_proc_rc,
+            saw_result=_ac_saw_result,
         )
     ):
         # #568: emit the fields a future narrowing decision would need.
