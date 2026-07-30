@@ -38,6 +38,30 @@ def _parse_callback_data(data: str) -> tuple[str, str]:
     return command_id, args_text
 
 
+def _early_answer_toast(backend: object, args_text: str, chat_id: int) -> str | None:
+    """Call a backend's ``early_answer_toast`` hook, passing the chat it fired in.
+
+    #715: the toast is chosen from registry state (is there a live flow? was
+    one just answered?), and that state is per-chat — so a hook that cannot
+    see which chat tapped can only answer globally, and in a fleet running
+    concurrent chats it answers about someone else's run.
+
+    ``early_answer_toast`` is an internal duck-typed hook, not part of the
+    ``CommandBackend`` Protocol, so a backend may still carry the older
+    ``(args_text)`` signature. Fall back to it rather than letting a
+    ``TypeError`` escape: this runs before ``backend.handle`` inside the
+    dispatch ``try``, and an exception here would take out the whole
+    callback — a strictly worse outcome than a slightly less specific toast.
+    """
+    hook = getattr(backend, "early_answer_toast", None)
+    if hook is None:
+        return None
+    try:
+        return hook(args_text, channel_id=chat_id)
+    except TypeError:
+        return hook(args_text)
+
+
 async def _dispatch_command(
     cfg: TelegramBridgeConfig,
     msg: TelegramIncomingMessage,
@@ -284,7 +308,7 @@ async def _dispatch_callback(
         # entry); the `early=True` flag lets us split the metric by branch
         # when grepping.
         if getattr(backend, "answer_early", False) and callback_query_id is not None:
-            toast = backend.early_answer_toast(args_text)  # type: ignore[attr-defined]
+            toast = _early_answer_toast(backend, args_text, chat_id)
             # Always answer early when the backend opts in, even if the toast
             # is None — clearing the spinner before backend.handle() is the
             # whole point. A None toast just means no toast text will appear.
