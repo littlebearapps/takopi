@@ -4,10 +4,11 @@
 >
 > This is a decision about **Untether's integration**, not about AMP itself.
 > AMP remotely refuses clients it considers out of date — a two-month-old build
-> returns `426 This version of Amp is no longer supported. Run `amp update``,
-> and it exits **`rc=0`** while doing so, so a refused run can look like an
-> empty one. Untether does not track that update cadence, so a working setup
-> can stop working without notice.
+> returns `426 This version of Amp is no longer supported. Run `amp update`` and
+> exits **1**, so the run surfaces as an error within seconds. Untether does not
+> track that update cadence, so a working setup can stop working without notice.
+> Note `amp threads list` is local and does not hit the version gate, so
+> `/threads` can keep working while `amp -x` is refused.
 >
 > Combined with no observed Untether usage, the integration is frozen: security
 > fixes only, no feature work, no parity catch-up, and cross-engine sweeps skip

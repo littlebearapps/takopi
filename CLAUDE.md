@@ -61,12 +61,15 @@ run; they are not supported.
 
 - **`gemini`** — Google ended Gemini CLI support for individual and free accounts on
   **2026-06-18**, directing users to Antigravity CLI. On those accounts it fails with
-  `IneligibleTierError: This client is no longer supported` — and exits **`rc=0`**, so
-  a failed run looks empty. Enterprise / Google Cloud licences may still work, unverified.
+  `IneligibleTierError: This client is no longer supported` and exits **1**. Under
+  Untether the subprocess **hangs instead of exiting**, so the run stalls to the
+  watchdog auto-cancel (~10 min) rather than erroring — known defect, not being fixed.
+  Enterprise / Google Cloud licences may still work, unverified.
 - **`amp`** — integration unmaintained. AMP remotely refuses out-of-date clients
-  (`426 This version of Amp is no longer supported`), also at **`rc=0`**. Decision is
-  about our integration, not AMP itself. The AMP-only `/threads` command is deprecated
-  alongside it.
+  (`426 This version of Amp is no longer supported`) and exits **1**, so it fails fast.
+  `amp threads list` is local and does NOT hit the version gate, so `/threads` can keep
+  working while `amp -x` is refused. Decision is about our integration, not AMP itself.
+  The AMP-only `/threads` command is deprecated alongside it.
 
 **Working rule:** when a cross-engine sweep breaks either runner, `xfail`/`skip` the
 test — do NOT fix the runner. Security fixes still apply. Both are excluded from every
@@ -226,8 +229,8 @@ Key test files:
 - `test_export_command.py` — 16 tests: session event recording, markdown/JSON export formatting, usage integration, session trimming
 - `test_browse_command.py` — 39 tests: path registry, directory listing, file preview, inline keyboard buttons, project-aware root resolution, security (path traversal)
 - `test_meta_line.py` — 70 tests: model name shortening (incl. Claude 5 major-only IDs, the `fable` family and the `[1m]` context marker, #688), meta line formatting, ProgressTracker meta storage/snapshot, footer ordering (context/meta/resume)
-- `test_error_hints.py` — end-of-life/unsupported-client hints ordered ahead of the generic `invalid_request_error` pattern, so Gemini's `IneligibleTierError` and AMP's `426` (both emitted at `rc=0`) surface as failures rather than empty answers
-- `test_threads_command.py` — `/threads` (AMP-only, deprecated): thread registry, formatting, callback-data bounds, plus `rc=0` fatal-stderr promotion so an AMP `426` refusal no longer renders as "No AMP threads found"
+- `test_error_hints.py` — end-of-life/unsupported-client hints ordered ahead of the generic `invalid_request_error` pattern, which AMP's `426` payload would otherwise match with a misleading "Invalid API request" hint
+- `test_threads_command.py` — `/threads` (AMP-only, deprecated): thread registry, formatting, callback-data bounds, plus a defensive zero-exit fatal-stderr guard (`amp threads list` exits 0 and does not hit AMP's version gate, so this is belt-and-braces rather than an observed failure)
 - `test_runner_utils.py` — 43 tests: error formatting helpers, drain_stderr capture, enriched error messages, stderr sanitisation
 - `test_shutdown.py` — 19 tests: shutdown state transitions, idempotency, reset, evidence-gated drain-timeout selection, self-restart argv matcher + descendant evidence scan (#690)
 - `test_drain_notify.py` — 15 tests: drain start/timeout notices, per-chat dedupe, forum-topic thread routing + (channel, thread) dedupe (#665)

@@ -253,7 +253,7 @@ def test_callback_data_within_64_bytes() -> None:
             assert len(data.encode("utf-8")) <= 64, f"callback_data too long: {data}"
 
 
-# --- rc=0 fatal-stderr promotion (#NEW) ---
+# --- defensive zero-exit fatal-stderr guard ---
 
 
 def test_is_amp_stderr_failure_detects_426() -> None:
@@ -282,8 +282,11 @@ def test_is_amp_stderr_failure_ignores_benign_stderr() -> None:
 async def test_run_amp_command_promotes_rc0_fatal_stderr(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AMP's 426 refusal exits rc=0; without promotion `threads list` parses
-    empty stdout and renders "No AMP threads found"."""
+    """A zero exit carrying a fatal stderr message must be promoted, otherwise
+    `threads list` parses empty stdout and renders "No AMP threads found".
+
+    Defensive: `amp threads list` is local and exits non-zero on real failures,
+    so this shape has not been observed in the wild. Cheap insurance."""
     import untether.telegram.commands.threads as threads_mod
 
     @dataclass
@@ -311,7 +314,8 @@ async def test_run_amp_command_promotes_rc0_fatal_stderr(
 async def test_run_amp_command_leaves_clean_rc0_alone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A genuine success (e.g. archive, which prints nothing) stays rc=0."""
+    """A genuine success (e.g. archive, which prints nothing) stays rc=0 — this
+    is the negative control that keeps the guard from breaking working calls."""
     import untether.telegram.commands.threads as threads_mod
 
     @dataclass

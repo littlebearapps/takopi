@@ -4,9 +4,11 @@
 >
 > Google ended Gemini CLI support for individual and free accounts on
 > **18 June 2026**, directing users to [Antigravity CLI](https://antigravity.google).
-> On an individual account the CLI now exits with
-> `IneligibleTierError: This client is no longer supported` — note it exits
-> **`rc=0`**, so a failed run can look like an empty one.
+> On an individual account the CLI fails with
+> `IneligibleTierError: This client is no longer supported` and exits **1**.
+> Under Untether, however, the subprocess **hangs instead of exiting**, so the
+> run stalls until the watchdog auto-cancels it (~10 min) rather than reporting
+> an error. Known defect; not being fixed, as the engine is deprecated.
 >
 > Enterprise / Google Cloud licences may still work, but Untether no longer
 > verifies this and does no further work on this runner beyond security fixes.

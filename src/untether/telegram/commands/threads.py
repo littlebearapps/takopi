@@ -46,12 +46,18 @@ def _resolve_thread(tid: int) -> str | None:
     return _THREAD_REGISTRY.get(tid)
 
 
-# AMP exits rc=0 while printing fatal errors to stderr — notably the
-# `426 This version of Amp is no longer supported. Run `amp update`` refusal of
-# out-of-date clients. Callers here only branch on a non-zero return code, so a
-# refused `threads list` would parse empty stdout and render "No AMP threads
-# found" instead of the real reason. These markers promote such an exit to a
-# failure so the user sees AMP's own message (and the matching error hint).
+# Defensive guard. Callers below branch only on a non-zero return code, so any
+# AMP subcommand that reported a fatal error on stderr while exiting 0 would
+# parse empty stdout and render "No AMP threads found" instead of the real
+# reason. These markers promote such an exit to a failure so the user sees AMP's
+# own message (and the matching error hint).
+#
+# Measured 2026-07-30: `amp threads list` exits 0 on success and 1 on failure,
+# and — being a local command — does NOT hit the server-side version gate that
+# makes `amp -x` return `426 This version of Amp is no longer supported`. So this
+# guard is belt-and-braces against a shape AMP has not actually been observed to
+# produce, not a fix for a reproduced bug. Kept because it is cheap and keyed on
+# stderr content, so a genuine no-output success (`threads archive`) is unaffected.
 _AMP_FATAL_STDERR_MARKERS = (
     "no longer supported",
     "unexpected error inside amp",
