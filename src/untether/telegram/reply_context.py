@@ -14,14 +14,28 @@ _REFERENCE_NOTICE = (
 
 def _normalise_reference(text: str) -> str:
     normalised = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-    normalised = "".join(
+    return "".join(
         char if char in {"\n", "\t"} or ord(char) >= 0x20 else "�"
         for char in normalised
     )
-    if len(normalised) <= REPLY_CONTEXT_MAX_CHARS:
-        return normalised
-    keep = REPLY_CONTEXT_MAX_CHARS - len(_TRUNCATION_MARKER)
-    return normalised[:keep].rstrip() + _TRUNCATION_MARKER
+
+
+def _escape_bounded_reference(text: str) -> str:
+    pieces: list[str] = []
+    size = 0
+    for char in text:
+        piece = escape(char, quote=False)
+        if size + len(piece) > REPLY_CONTEXT_MAX_CHARS:
+            break
+        pieces.append(piece)
+        size += len(piece)
+    else:
+        return "".join(pieces)
+
+    marker_size = len(_TRUNCATION_MARKER)
+    while pieces and size + marker_size > REPLY_CONTEXT_MAX_CHARS:
+        size -= len(pieces.pop())
+    return "".join(pieces).rstrip() + _TRUNCATION_MARKER
 
 
 def append_reply_context(
@@ -44,7 +58,7 @@ def append_reply_context(
     reference = _normalise_reference(reference)
     if not reference:
         return prompt
-    escaped = escape(reference, quote=False)
+    escaped = _escape_bounded_reference(reference)
     block = (
         "<telegram_reply_context>\n"
         f"{_REFERENCE_NOTICE}\n"

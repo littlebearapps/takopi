@@ -37,3 +37,18 @@ def test_append_reply_context_truncates_and_escapes_reference() -> None:
         "</telegram_reply_context>"
     )
     assert len(bounded) == REPLY_CONTEXT_MAX_CHARS
+
+
+def test_append_reply_context_bounds_serialised_escape_heavy_reference() -> None:
+    prompt = append_reply_context(
+        "change this",
+        selected_quote="&" * REPLY_CONTEXT_MAX_CHARS,
+        reply_text=None,
+    )
+
+    opening = "<selected_quote>\n"
+    closing = "\n</selected_quote>"
+    serialised = prompt.split(opening, 1)[1].split(closing, 1)[0]
+    assert len(serialised) <= REPLY_CONTEXT_MAX_CHARS
+    assert serialised.endswith("[… reply context truncated by Untether …]")
+    assert "&amp;" in serialised
