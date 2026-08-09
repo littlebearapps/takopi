@@ -79,7 +79,8 @@ def test_parse_incoming_update_uses_reply_caption_fallback() -> None:
     msg = parse_incoming_update(update, chat_id=123)
 
     assert isinstance(msg, TelegramIncomingMessage)
-    assert msg.reply_to_text == "photo caption"
+    assert msg.reply_to_text is None
+    assert msg.reply_reference_text == "photo caption"
     assert msg.reply_quote_text is None
 
 

@@ -1021,6 +1021,9 @@ class ResumeResolver:
         topic_key: tuple[int, int] | None,
         engine_for_session: EngineId,
         prompt_text: str,
+        reply_quote_text: str | None = None,
+        reply_reference_text: str | None = None,
+        reply_to_is_bot: bool | None = None,
     ) -> ResumeDecision:
         if resume_token is not None:
             return ResumeDecision(
@@ -1031,6 +1034,12 @@ class ResumeResolver:
                 MessageRef(channel_id=chat_id, message_id=reply_id)
             )
             if running_task is not None:
+                prompt_text = append_reply_context(
+                    prompt_text,
+                    selected_quote=reply_quote_text,
+                    reply_text=reply_reference_text,
+                    omit_full_reply=reply_to_is_bot is True,
+                )
                 self._task_group.start_soon(
                     send_with_resume,
                     self._cfg,
@@ -2181,14 +2190,10 @@ async def run_main_loop(
                 chat_id = msg.chat_id
                 user_msg_id = msg.message_id
                 context = resolved.context
-                prompt_text = append_reply_context(
-                    prompt_text,
-                    selected_quote=msg.reply_quote_text,
-                    reply_text=msg.reply_to_text,
-                    omit_full_reply=(
-                        msg.reply_to_is_bot is True
-                        and resolved.resume_token is not None
-                    ),
+                reply_reference_text = (
+                    msg.reply_reference_text
+                    if msg.reply_reference_text is not None
+                    else msg.reply_to_text
                 )
                 engine_resolution = await resolve_engine_defaults(
                     explicit_engine=resolved.engine_override,
@@ -2207,10 +2212,21 @@ async def run_main_loop(
                     topic_key=topic_key,
                     engine_for_session=engine_resolution.engine,
                     prompt_text=prompt_text,
+                    reply_quote_text=msg.reply_quote_text,
+                    reply_reference_text=reply_reference_text,
+                    reply_to_is_bot=msg.reply_to_is_bot,
                 )
                 if resume_decision.handled_by_running_task:
                     return
                 resume_token = resume_decision.resume_token
+                prompt_text = append_reply_context(
+                    prompt_text,
+                    selected_quote=msg.reply_quote_text,
+                    reply_text=reply_reference_text,
+                    omit_full_reply=(
+                        msg.reply_to_is_bot is True and resume_token is not None
+                    ),
+                )
                 if resume_token is None:
                     await run_job(
                         chat_id,
