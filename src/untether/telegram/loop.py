@@ -60,6 +60,7 @@ from .context import _merge_topic_context, _usage_ctx_set, _usage_topic
 from .engine_defaults import resolve_engine_for_message
 from .engine_overrides import merge_overrides
 from .listen_mode import resolve_listen_mode, should_trigger_run
+from .reply_context import append_reply_context
 from .topic_state import TopicStateStore, resolve_state_path
 from .topics import (
     _maybe_rename_topic,
@@ -2180,6 +2181,15 @@ async def run_main_loop(
                 chat_id = msg.chat_id
                 user_msg_id = msg.message_id
                 context = resolved.context
+                prompt_text = append_reply_context(
+                    prompt_text,
+                    selected_quote=msg.reply_quote_text,
+                    reply_text=msg.reply_to_text,
+                    omit_full_reply=(
+                        msg.reply_to_is_bot is True
+                        and resolved.resume_token is not None
+                    ),
+                )
                 engine_resolution = await resolve_engine_defaults(
                     explicit_engine=resolved.engine_override,
                     context=context,
