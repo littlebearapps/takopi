@@ -2867,6 +2867,80 @@ async def test_run_main_loop_routes_image_to_codex_out_of_band(
 
 
 @pytest.mark.anyio
+async def test_run_main_loop_continue_command_preserves_image(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    payload = b"continued image"
+
+    class _ImageBot(FakeBot):
+        async def get_file(self, file_id: str) -> File | None:
+            return File(file_path="photos/continued.png")
+
+        async def download_file(self, file_path: str) -> bytes | None:
+            return payload
+
+    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    projects = ProjectsConfig(
+        projects={
+            "proj": ProjectConfig(
+                alias="proj", path=tmp_path, worktrees_dir=Path(".worktrees")
+            )
+        },
+        default_project="proj",
+    )
+    cfg = TelegramBridgeConfig(
+        bot=_ImageBot(),
+        runtime=TransportRuntime(router=_make_router(runner), projects=projects),
+        chat_id=123,
+        startup_msg="",
+        exec_cfg=ExecBridgeConfig(
+            transport=FakeTransport(),
+            presenter=MarkdownPresenter(),
+            final_notify=True,
+        ),
+        forward_coalesce_s=FAST_FORWARD_COALESCE_S,
+        media_group_debounce_s=FAST_MEDIA_GROUP_DEBOUNCE_S,
+    )
+    calls: list[dict[str, Any]] = []
+
+    async def _capture_run_engine(**kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(telegram_loop, "run_engine", _capture_run_engine)
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield TelegramIncomingMessage(
+            transport="telegram",
+            chat_id=123,
+            message_id=1,
+            text="/continue inspect this",
+            reply_to_message_id=None,
+            reply_to_text=None,
+            sender_id=123,
+            chat_type="private",
+            document=TelegramDocument(
+                file_id="continued-image",
+                file_name="continued.png",
+                mime_type="image/png",
+                file_size=len(payload),
+                raw={"file_id": "continued-image"},
+                is_image=True,
+            ),
+        )
+
+    await run_main_loop(cfg, poller)
+
+    assert len(calls) == 1
+    assert calls[0]["text"] == "inspect this"
+    resume = calls[0]["resume_token"]
+    assert resume is not None and resume.is_continue
+    options = calls[0]["run_options"]
+    assert isinstance(options, EngineRunOptions)
+    assert options.image_paths == ("incoming/continued.png",)
+
+
+@pytest.mark.anyio
 async def test_uncaptioned_image_uses_persisted_chat_session_resume_after_restart(
     tmp_path: Path,
     monkeypatch,

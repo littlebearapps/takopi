@@ -2567,6 +2567,27 @@ async def run_main_loop(
                         value="",
                         is_continue=True,
                     )
+                    image_paths: tuple[str, ...] = ()
+                    if (
+                        engine_resolution.engine == "codex"
+                        and msg.document is not None
+                        and msg.document.is_image
+                    ):
+                        saved = await save_file_put(
+                            cfg,
+                            msg,
+                            "",
+                            resolved.context,
+                            state.topic_store,
+                        )
+                        if saved is None:
+                            return
+                        image_paths = (saved.rel_path.as_posix(),)
+                        if not resolved.prompt.strip():
+                            resolved = replace(
+                                resolved,
+                                prompt=DEFAULT_IMAGE_ANALYSIS_PROMPT,
+                            )
                     resolved = ResolvedMessage(
                         prompt=resolved.prompt,
                         resume_token=continue_token,
@@ -2581,6 +2602,7 @@ async def run_main_loop(
                         chat_session_key=chat_session_key,
                         reply_ref=reply_ref,
                         reply_id=reply_id,
+                        image_paths=image_paths,
                     )
                     return
                 if command_id is not None and _dispatch_builtin_command(
