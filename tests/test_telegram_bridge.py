@@ -1300,7 +1300,39 @@ async def test_run_main_loop_plain_bot_resume_does_not_duplicate_response() -> N
     assert len(runner.calls) == 1
     prompt, resume = runner.calls[0]
     assert prompt.endswith("continue with tests")
-    assert resume == ResumeToken(engine=CODEX_ENGINE, value="session-1")
+    assert resume is not None
+    assert resume.engine == CODEX_ENGINE
+    assert resume.value == "session-1"
+
+
+@pytest.mark.anyio
+async def test_run_main_loop_resume_footer_without_sender_metadata_is_routing_only() -> (
+    None
+):
+    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    cfg = make_cfg(FakeTransport(), runner)
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield TelegramIncomingMessage(
+            transport="telegram",
+            chat_id=123,
+            message_id=1,
+            text="continue with image",
+            reply_to_message_id=20,
+            reply_to_text="codex resume session-1",
+            reply_to_is_bot=None,
+            sender_id=123,
+        )
+
+    await run_main_loop(cfg, poller)
+
+    assert len(runner.calls) == 1
+    prompt, resume = runner.calls[0]
+    assert prompt.endswith("continue with image")
+    assert "<telegram_reply_context>" not in prompt
+    assert resume is not None
+    assert resume.engine == CODEX_ENGINE
+    assert resume.value == "session-1"
 
 
 @pytest.mark.anyio

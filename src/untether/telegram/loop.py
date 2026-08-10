@@ -2223,9 +2223,7 @@ async def run_main_loop(
                     prompt_text,
                     selected_quote=msg.reply_quote_text,
                     reply_text=reply_reference_text,
-                    omit_full_reply=(
-                        msg.reply_to_is_bot is True and resume_token is not None
-                    ),
+                    omit_full_reply=resume_token is not None,
                 )
                 if resume_token is None:
                     await run_job(
