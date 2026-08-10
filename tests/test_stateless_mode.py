@@ -138,6 +138,42 @@ class TestChatSessionKeyStateless:
         store = ChatSessionStore.__new__(ChatSessionStore)
         assert _chat_session_key(msg, store=store) is None
 
+    def test_private_chat_topic_uses_thread_scoped_session(self) -> None:
+        """Private-chat topics keep independent sessions without forum topic mode."""
+        msg = TelegramIncomingMessage(
+            transport="telegram",
+            chat_id=123,
+            message_id=1,
+            text="hello",
+            reply_to_message_id=None,
+            reply_to_text=None,
+            sender_id=123,
+            chat_type="private",
+            thread_id=77,
+        )
+        store = ChatSessionStore.__new__(ChatSessionStore)
+        assert _chat_session_key(msg, store=store) == (123, 77)
+
+    def test_private_chat_topics_and_main_chat_have_distinct_sessions(self) -> None:
+        store = ChatSessionStore.__new__(ChatSessionStore)
+
+        def private_message(thread_id: int | None) -> TelegramIncomingMessage:
+            return TelegramIncomingMessage(
+                transport="telegram",
+                chat_id=123,
+                message_id=1,
+                text="hello",
+                reply_to_message_id=None,
+                reply_to_text=None,
+                sender_id=123,
+                chat_type="private",
+                thread_id=thread_id,
+            )
+
+        assert _chat_session_key(private_message(None), store=store) == (123, None)
+        assert _chat_session_key(private_message(77), store=store) == (123, 77)
+        assert _chat_session_key(private_message(88), store=store) == (123, 88)
+
 
 # ---------------------------------------------------------------------------
 # _ResumeLineProxy — confirms resume line suppression

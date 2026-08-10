@@ -26,6 +26,27 @@ async def test_chat_sessions_store_roundtrip(tmp_path) -> None:
 
 
 @pytest.mark.anyio
+async def test_private_chat_topic_sessions_are_isolated(tmp_path) -> None:
+    path = tmp_path / "telegram_chat_sessions_state.json"
+    store = ChatSessionStore(path)
+    sessions = {
+        None: "main-session",
+        77: "topic-77-session",
+        88: "topic-88-session",
+    }
+    for thread_id, resume in sessions.items():
+        await store.set_session_resume(
+            1, thread_id, ResumeToken(engine="codex", value=resume)
+        )
+
+    reloaded = ChatSessionStore(path)
+    for thread_id, resume in sessions.items():
+        assert await reloaded.get_session_resume(1, thread_id, "codex") == ResumeToken(
+            engine="codex", value=resume
+        )
+
+
+@pytest.mark.anyio
 async def test_chat_sessions_store_clear(tmp_path) -> None:
     path = tmp_path / "telegram_chat_sessions_state.json"
     store = ChatSessionStore(path)

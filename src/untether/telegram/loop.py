@@ -102,11 +102,11 @@ def _format_answered_echo(text: str) -> str:
 def _chat_session_key(
     msg: TelegramIncomingMessage, *, store: ChatSessionStore | None
 ) -> tuple[int, int | None] | None:
-    if store is None or msg.thread_id is not None:
+    if store is None:
         return None
     if msg.chat_type == "private":
-        return (msg.chat_id, None)
-    if msg.sender_id is None:
+        return (msg.chat_id, msg.thread_id)
+    if msg.thread_id is not None or msg.sender_id is None:
         return None
     return (msg.chat_id, msg.sender_id)
 

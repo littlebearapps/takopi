@@ -2192,13 +2192,14 @@ async def test_run_main_loop_auto_resumes_chat_sessions(tmp_path: Path) -> None:
             reply_to_message_id=None,
             reply_to_text=None,
             sender_id=123,
+            thread_id=77,
             chat_type="private",
         )
 
     await run_main_loop(cfg, poller)
 
     store = ChatSessionStore(resolve_sessions_path(state_path))
-    stored = await store.get_session_resume(123, None, CODEX_ENGINE)
+    stored = await store.get_session_resume(123, 77, CODEX_ENGINE)
     assert stored == ResumeToken(engine=CODEX_ENGINE, value=resume_value)
 
     runner2 = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
@@ -2227,6 +2228,7 @@ async def test_run_main_loop_auto_resumes_chat_sessions(tmp_path: Path) -> None:
             reply_to_message_id=None,
             reply_to_text=None,
             sender_id=123,
+            thread_id=77,
             chat_type="private",
         )
 
@@ -3291,7 +3293,7 @@ async def test_run_main_loop_new_clears_chat_sessions(tmp_path: Path) -> None:
     state_path = tmp_path / "untether.toml"
     store = ChatSessionStore(resolve_sessions_path(state_path))
     await store.set_session_resume(
-        123, None, ResumeToken(engine=CODEX_ENGINE, value="resume-1")
+        123, 77, ResumeToken(engine=CODEX_ENGINE, value="resume-1")
     )
 
     transport = FakeTransport()
@@ -3327,13 +3329,14 @@ async def test_run_main_loop_new_clears_chat_sessions(tmp_path: Path) -> None:
             reply_to_message_id=None,
             reply_to_text=None,
             sender_id=123,
+            thread_id=77,
             chat_type="private",
         )
 
     await run_main_loop(cfg, poller)
 
     store2 = ChatSessionStore(resolve_sessions_path(state_path))
-    assert await store2.get_session_resume(123, None, CODEX_ENGINE) is None
+    assert await store2.get_session_resume(123, 77, CODEX_ENGINE) is None
 
 
 @pytest.mark.anyio
