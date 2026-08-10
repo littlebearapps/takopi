@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from html import escape
+from unicodedata import category
 
 __all__ = ["REPLY_CONTEXT_MAX_CHARS", "append_reply_context"]
 
@@ -15,17 +16,17 @@ _REFERENCE_NOTICE = (
 def _normalise_reference(text: str) -> str:
     normalised = text.replace("\r\n", "\n").replace("\r", "\n").strip()
     return "".join(
-        char if char in {"\n", "\t"} or ord(char) >= 0x20 else "�"
+        char if char in {"\n", "\t"} or category(char) not in {"Cc", "Cf"} else "�"
         for char in normalised
     )
 
 
-def _escape_bounded_reference(text: str) -> str:
+def _escape_bounded_reference(text: str, *, max_chars: int) -> str:
     pieces: list[str] = []
     size = 0
     for char in text:
         piece = escape(char, quote=False)
-        if size + len(piece) > REPLY_CONTEXT_MAX_CHARS:
+        if size + len(piece) > max_chars:
             break
         pieces.append(piece)
         size += len(piece)
@@ -33,7 +34,7 @@ def _escape_bounded_reference(text: str) -> str:
         return "".join(pieces)
 
     marker_size = len(_TRUNCATION_MARKER)
-    while pieces and size + marker_size > REPLY_CONTEXT_MAX_CHARS:
+    while pieces and size + marker_size > max_chars:
         size -= len(pieces.pop())
     return "".join(pieces).rstrip() + _TRUNCATION_MARKER
 
@@ -58,13 +59,13 @@ def append_reply_context(
     reference = _normalise_reference(reference)
     if not reference:
         return prompt
-    escaped = _escape_bounded_reference(reference)
-    block = (
-        "<telegram_reply_context>\n"
-        f"{_REFERENCE_NOTICE}\n"
-        f"<{tag}>\n{escaped}\n</{tag}>\n"
-        "</telegram_reply_context>"
+    prefix = f"<telegram_reply_context>\n{_REFERENCE_NOTICE}\n<{tag}>\n"
+    suffix = f"\n</{tag}>\n</telegram_reply_context>"
+    escaped = _escape_bounded_reference(
+        reference,
+        max_chars=REPLY_CONTEXT_MAX_CHARS - len(prefix) - len(suffix),
     )
+    block = f"{prefix}{escaped}{suffix}"
     if not prompt:
         return block
     return f"{prompt}\n\n{block}"
