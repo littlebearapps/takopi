@@ -216,7 +216,7 @@ class TestHomePage:
         ctx = _make_ctx(config_path=state_path, default_engine="claude")
         await cmd.handle(ctx)
         msg = _last_send_msg(ctx)
-        assert "Plan mode" in msg.text
+        assert "Permission mode" in msg.text
         assert "config:pm" in _buttons_data(msg)
 
     @pytest.mark.anyio
@@ -227,7 +227,7 @@ class TestHomePage:
         ctx = _make_ctx(config_path=state_path, default_engine="opencode")
         await cmd.handle(ctx)
         msg = _last_send_msg(ctx)
-        assert "Plan mode" not in msg.text
+        assert "Permission mode" not in msg.text
         assert "Approval" not in msg.text
         assert "config:pm" not in _buttons_data(msg)
 
@@ -717,7 +717,7 @@ class TestGeminiApprovalMode:
         assert "Approval mode" in msg.text
         assert "config:pm" in _buttons_data(msg)
         # Should NOT show Claude-specific features
-        assert "Plan mode" not in msg.text
+        assert "Permission mode" not in msg.text
         assert "Ask mode" not in msg.text
 
     @pytest.mark.anyio
@@ -1141,7 +1141,7 @@ class TestEngineAwareTransitions:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Plan mode" in msg.text
+        assert "Permission mode" in msg.text
         assert "config:pm" in _buttons_data(msg)
 
     @pytest.mark.anyio
@@ -1158,7 +1158,7 @@ class TestEngineAwareTransitions:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Plan mode" not in msg.text
+        assert "Permission mode" not in msg.text
         assert "config:pm" not in _buttons_data(msg)
 
     @pytest.mark.anyio
@@ -1221,7 +1221,7 @@ class TestProjectDefaultEngine:
         msg = _last_send_msg(ctx)
         assert "Engine: <b>codex</b>" in msg.text
         # Claude Code-specific "Plan mode" label hidden; shows "Approval policy"
-        assert "Plan mode" not in msg.text
+        assert "Permission mode" not in msg.text
         assert "Approval policy" in msg.text
         assert "config:pm" in _buttons_data(msg)
 
@@ -1243,7 +1243,7 @@ class TestProjectDefaultEngine:
         msg = _last_send_msg(ctx)
         assert "Engine: <b>claude (default)</b>" in msg.text
         # Claude Code buttons should be visible
-        assert "Plan mode" in msg.text
+        assert "Permission mode" in msg.text
         assert "config:pm" in _buttons_data(msg)
 
     @pytest.mark.anyio

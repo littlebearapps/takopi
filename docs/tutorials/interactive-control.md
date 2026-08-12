@@ -14,7 +14,8 @@ Untether offers three permission modes that control how much oversight you have:
 | Mode | Command | What happens |
 |------|---------|-------------|
 | **Plan** | `/planmode on` | Every tool call shows Approve / Deny buttons. Full control. |
-| **Auto** | `/planmode auto` | Tools are auto-approved. Plan transitions are also auto-approved. Hands-off. |
+| **Plan-auto** | `/planmode plan-auto` | Tools are auto-approved. Plan transitions are also auto-approved. Hands-off. |
+| **Auto** | `/planmode auto` | Claude Code's own auto mode — a classifier approves routine work and blocks risky actions. No plan phase. |
 | **Accept edits** | `/planmode off` | No approval buttons at all. Claude Code runs autonomously. |
 
 For this tutorial, we'll use **Plan** mode so you can see every interaction.

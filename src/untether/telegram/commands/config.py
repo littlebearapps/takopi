@@ -316,7 +316,9 @@ async def _page_home(ctx: CommandContext) -> None:
     if show_plan_mode:
         if current_engine == "claude":
             lines.append("<b>Agent controls</b> <i>(Claude Code)</i>")
-            lines.append(f"Plan mode: <b>{pm_label}</b>{_home_hint('pm', pm_label)}")
+            lines.append(
+                f"Permission mode: <b>{pm_label}</b>{_home_hint('pm', pm_label)}"
+            )
             if show_ask_questions:
                 lines.append(
                     f"Ask mode: <b>{aq_display}</b>{_home_hint('aq', aq_label)}"
@@ -415,7 +417,7 @@ async def _page_home(ctx: CommandContext) -> None:
         # Claude Code layout
         buttons.append(
             [
-                {"text": "📋 Plan mode", "callback_data": "config:pm"},
+                {"text": "📋 Permission mode", "callback_data": "config:pm"},
                 {"text": "❓ Ask mode", "callback_data": "config:aq"},
             ]
         )
