@@ -60,6 +60,40 @@ def normalize_override_value(value: str | None) -> str | None:
     return cleaned or None
 
 
+def migrate_legacy_permission_mode(engine: str, mode: str | None) -> str | None:
+    """Rewrite pre-0.35.5rc8 Claude ``auto`` prefs to ``plan-auto`` (#741).
+
+    Stored chat prefs were only ever written by Untether's own ``/planmode``
+    and ``/config`` buttons, so an ``auto`` there unambiguously meant the
+    plan-gate sugar — migrating it preserves the behaviour the user chose.
+    Hand-authored TOML is deliberately NOT migrated: there ``auto`` now means
+    the CLI's own auto mode, and the runner logs a one-shot WARN instead.
+
+    Claude-only by construction: ``auto`` is a legitimate, differently-meaning
+    value for Codex, so it must not be rewritten there.
+    """
+    from ..runners.run_options import (
+        CLAUDE_PLAN_AUTO_MODE,
+        LEGACY_CLAUDE_PLAN_AUTO_MODE,
+    )
+
+    if engine == "claude" and mode == LEGACY_CLAUDE_PLAN_AUTO_MODE:
+        return CLAUDE_PLAN_AUTO_MODE
+    return mode
+
+
+def migrate_legacy_overrides(
+    engine: str, overrides: EngineOverrides | None
+) -> EngineOverrides | None:
+    """Apply :func:`migrate_legacy_permission_mode` to a stored override."""
+    if overrides is None:
+        return None
+    migrated = migrate_legacy_permission_mode(engine, overrides.permission_mode)
+    if migrated == overrides.permission_mode:
+        return overrides
+    return msgspec.structs.replace(overrides, permission_mode=migrated)
+
+
 def normalize_overrides(overrides: EngineOverrides | None) -> EngineOverrides | None:
     if overrides is None:
         return None

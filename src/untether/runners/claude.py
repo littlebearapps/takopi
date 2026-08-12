@@ -62,7 +62,14 @@ from ..utils.subprocess import (
     signal_pid_group,
     wrap_with_env_i,
 )
-from .run_options import get_run_options
+from .run_options import (
+    CLAUDE_PLAN_AUTO_MODE,
+    LEGACY_CLAUDE_PLAN_AUTO_MODE,
+    VALID_PERMISSION_MODES_BY_ENGINE,
+    claude_cli_permission_mode,
+    get_run_options,
+    is_claude_plan_auto,
+)
 from .tool_actions import tool_input_path, tool_kind_and_title
 
 logger = get_logger(__name__)
@@ -478,7 +485,8 @@ class ClaudeStreamState:
     control_action_for_tool: dict[str, str] = field(default_factory=dict)
     # Map request_id -> action_id for reconciling callback-handled requests (#229)
     request_to_action: dict[str, str] = field(default_factory=dict)
-    # Auto-approve ExitPlanMode when permission_mode is "auto"
+    # Auto-approve ExitPlanMode when permission_mode is `plan-auto` (#741;
+    # spelled `auto` before 0.35.5rc8)
     auto_approve_exit_plan_mode: bool = False
     # Whether this run is a resume (for error diagnostics)
     resumed: bool = False
@@ -3219,7 +3227,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             args.append("--dangerously-skip-permissions")
 
         if effective_mode is not None:
-            cli_mode = "plan" if effective_mode == "auto" else effective_mode
+            # #741 every genuine CLI mode passes through verbatim — only
+            # Untether's own `plan-auto` sugar is translated (to `plan`).
+            # Until 0.35.5rc8 this line remapped `auto` to `plan`, which made
+            # the CLI's own classifier-gated `auto` mode unreachable.
+            cli_mode = claude_cli_permission_mode(effective_mode)
             args.extend(["--permission-mode", cli_mode])
             args.extend(["--permission-prompt-tool", "stdio"])
             # Prompt sent via stdin as JSON, not as CLI arg
@@ -3323,7 +3335,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
     def new_state(self, prompt: str, resume: ResumeToken | None) -> ClaudeStreamState:
         state = ClaudeStreamState()
-        state.auto_approve_exit_plan_mode = self._effective_permission_mode() == "auto"
+        state.auto_approve_exit_plan_mode = is_claude_plan_auto(
+            self._effective_permission_mode()
+        )
         state.resumed = resume is not None
         # #289 capture the first user message so loop observers can fall back
         # to it when ScheduleWakeup uses the <<autonomous-loop-dynamic>>
@@ -4997,6 +5011,52 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             self._pty_master_fd = None
 
 
+_LEGACY_AUTO_WARNED = False
+
+
+def _validate_permission_mode(value: object, config_path: Path) -> str | None:
+    """Validate ``[engines.claude] permission_mode`` at config-load time (#742).
+
+    Until 0.35.5rc8 this key was read raw, so a typo passed parse and then
+    killed the run at subprocess spawn with a CLI usage error — the exact
+    failure the cron-side validator exists to prevent.  Both paths now share
+    ``VALID_PERMISSION_MODES_BY_ENGINE["claude"]``.
+    """
+    global _LEGACY_AUTO_WARNED
+
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(
+            f"Invalid `claude.permission_mode` in {config_path}; expected a"
+            " non-empty string."
+        )
+    mode = value.strip()
+    allowed = VALID_PERMISSION_MODES_BY_ENGINE["claude"]
+    if mode not in allowed:
+        raise ConfigError(
+            f"Unknown `claude.permission_mode` {mode!r} in {config_path};"
+            f" allowed values: {sorted(allowed)}."
+        )
+    # #741 `auto` used to mean "plan mode + rubber-stamp the plan gate".  It
+    # now passes through to the CLI's own classifier-gated auto mode, which
+    # has no plan gate at all.  TOML is hand-authored, so we don't rewrite it
+    # — we warn once per process and let the new meaning stand.
+    if mode == LEGACY_CLAUDE_PLAN_AUTO_MODE and not _LEGACY_AUTO_WARNED:
+        _LEGACY_AUTO_WARNED = True
+        logger.warning(
+            "claude.permission_mode.auto_semantics_changed",
+            config_path=str(config_path),
+            note=(
+                "permission_mode = 'auto' now selects Claude Code's own auto"
+                " mode (classifier-gated, no plan gate). Set"
+                f" permission_mode = '{CLAUDE_PLAN_AUTO_MODE}' to keep the"
+                " previous behaviour (plan mode + auto-approved ExitPlanMode)."
+            ),
+        )
+    return mode
+
+
 def build_runner(config: EngineConfig, config_path: Path) -> Runner:
     claude_cmd = shutil.which("claude") or "claude"
 
@@ -5007,7 +5067,9 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
         allowed_tools = DEFAULT_ALLOWED_TOOLS
     dangerously_skip_permissions = config.get("dangerously_skip_permissions") is True
     use_api_billing = config.get("use_api_billing") is True
-    permission_mode = config.get("permission_mode")
+    permission_mode = _validate_permission_mode(
+        config.get("permission_mode"), config_path
+    )
     title = str(model) if model is not None else "claude"
 
     extra_args_value = config.get("extra_args")

@@ -88,7 +88,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 
 - 📡 **Progress streaming** — watch your agent work in real time; see tool calls, file changes, and elapsed time as they happen
 - 🔐 **Interactive permissions** — approve plan transitions and answer clarifying questions with inline option buttons; tools auto-execute, and "Pause & Outline Plan" holds the session open while you review the plan outline before approving
-- 📋 **Plan mode** — toggle per chat with `/planmode`; choose full manual approval, auto-approved transitions, or no plan phase
+- 📋 **Permission modes** — toggle per chat with `/planmode`; choose full manual approval, auto-approved plan transitions, Claude Code's own classifier-gated auto mode, or no plan phase
 - 📁 **Projects and worktrees** — register repos with `untether init`, target with `/myproject @feat/thing`, run branches in isolated worktrees in parallel
 - 💰 **Cost and usage tracking** — run agents remotely with confidence; per-run and daily budgets, `/usage` breakdowns, and optional auto-cancel keep spending visible. A per-run outlier alert fires even with no budget configured, so an expensive run can't pass unnoticed
 - 💡 **Actionable error hints** — friendly messages for API outages, rate limits, billing errors, and network failures with resume guidance
@@ -178,7 +178,7 @@ Claude effort levels: `low`, `medium`, `high`, `xhigh`, `max` (`xhigh` requires 
 | `/cancel` | Stop the running agent |
 | `/agent` | Show or set the engine for this chat |
 | `/model` | Override the model for an engine |
-| `/planmode` | Toggle plan mode (on/auto/off) |
+| `/planmode` | Toggle permission mode (on/plan-auto/auto/off) |
 | `/usage` | Show API costs for the current session (`/usage debug` shows fetch state, OAuth expiry, schema-mismatch counter) |
 | `/export` | Export session transcript |
 | `/browse` | Browse project files |

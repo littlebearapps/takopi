@@ -57,7 +57,7 @@ Key control channel features:
 * Session registries (`_SESSION_STDIN`, `_REQUEST_TO_SESSION`) for concurrent session support
 * Auto-approve for routine tools (Grep, Glob, Read, Bash, etc.)
 * `ExitPlanMode` requests shown as Telegram inline buttons (Approve / Deny / Pause & Outline Plan) in `plan` mode; post-outline buttons add **Let's discuss** for plan discussion before approval
-* `ExitPlanMode` requests silently auto-approved in `auto` mode (no buttons shown)
+* `ExitPlanMode` requests silently auto-approved in `plan-auto` mode (no buttons shown)
 * Text-based outline gate on ExitPlanMode after "Pause & Outline Plan" — retries without written outline text are auto-denied; the former time-based progressive cooldown was retired in [#570](https://github.com/littlebearapps/untether/issues/570) (upstream retry loop fixed in Claude Code ≥ 2.1.215)
 
 **Safety note:** `-p/--print` skips the workspace trust dialog; only use this flag in trusted directories.
@@ -92,7 +92,7 @@ Recommended v1 schema:
 
     [claude]
     model = "claude-sonnet-4-5-20250929" # optional (Claude Code supports model override in settings too)
-    permission_mode = "auto"             # optional: "plan", "auto", or "acceptEdits"
+    permission_mode = "plan-auto"        # optional — see "Permission modes" below
     allowed_tools = ["Bash", "Read", "Edit", "Write"] # optional but strongly recommended for automation
     extra_args = ["--chrome"]           # optional: extra upstream CLI flags (e.g. --chrome opts into Claude-in-Chrome)
     dangerously_skip_permissions = false # optional (high risk; prefer sandbox use only)
@@ -105,9 +105,68 @@ Notes:
 * Claude Code tools (Bash/Edit/Write/WebSearch/etc.) and whether permission is required are documented. ([Claude Code][2])
 * If `allowed_tools` is omitted, Untether defaults to `["Bash", "Read", "Edit", "Write"]`.
 * Untether reads `model`, `permission_mode`, `allowed_tools`, `extra_args`, `dangerously_skip_permissions`, and `use_api_billing` from `[claude]`.
-* `permission_mode = "auto"` uses `--permission-mode plan` on the CLI but auto-approves ExitPlanMode requests without showing Telegram buttons. Can also be set per chat via `/planmode auto`.
+* `permission_mode` is validated at config load against the same allowlist crons use ([#742](https://github.com/littlebearapps/untether/issues/742)); an unknown value raises a `ConfigError` instead of failing at subprocess spawn. See "Permission modes" below.
 * `extra_args` lets you pass additional upstream `claude` CLI flags that Untether doesn't expose directly — for example `["--chrome"]` opts into the Claude-in-Chrome extension (otherwise gated off by Claude Code 2.1.x), or `["--strict-mcp-config"]` / `["--mcp-config", "path"]` for MCP tweaks. Flags Untether manages internally (`-p`, `--print`, `--output-format`, `--input-format`, `--resume`/`-r`, `--continue`/`-c`, `--permission-mode`, `--permission-prompt-tool`) are rejected at config-load with a `ConfigError`. Mirrors `codex.extra_args` and `pi.extra_args`.
 * By default Untether strips `ANTHROPIC_API_KEY` from the subprocess environment so Claude Code uses subscription billing. Set `use_api_billing = true` to keep the key.
+
+### Permission modes
+
+Derived from **Claude Code CLI 2.1.228** (verified on lba-1, 2026-08-12). The
+canonical set lives in `runners/run_options.py`
+(`CLAUDE_CLI_PERMISSION_MODES`); `tests/test_claude_permission_modes.py`
+re-derives it from the installed binary and fails on drift.
+
+| `permission_mode` | Flag sent to the CLI | Meaning |
+|---|---|---|
+| `default` | `--permission-mode default` | Reads only; everything else prompts |
+| `manual` | `--permission-mode manual` | Documented alias for `default` (CLI ≥ 2.1.200) |
+| `acceptEdits` | `--permission-mode acceptEdits` | Reads, in-scope file edits, common filesystem commands |
+| `plan` | `--permission-mode plan` | Research only; edits blocked until the plan is approved |
+| **`plan-auto`** | `--permission-mode plan` | **Untether-only sugar** — plan mode with `ExitPlanMode` auto-approved |
+| `auto` | `--permission-mode auto` | Claude Code's own classifier-gated auto mode |
+| `dontAsk` | `--permission-mode dontAsk` | Auto-denies anything that would prompt; only pre-approved tools run |
+| `bypassPermissions` | `--permission-mode bypassPermissions` | Skips all checks |
+
+`plan-auto` is the **only** value Untether translates. Every other value
+reaches the CLI verbatim.
+
+> **Renamed in 0.35.5rc8 ([#741](https://github.com/littlebearapps/untether/issues/741)).**
+> `plan-auto` was spelled `auto` until 0.35.5rc7, which shadowed the CLI's own
+> `auto` mode and made it unreachable. Stored chat prefs are rewritten once,
+> at first load, guarded by a `permission_mode_migrated` flag in
+> `telegram_chat_prefs_state.json` — it must be one-shot, because after the
+> rename `auto` is a value the user can legitimately *choose* from the UI, and
+> a per-read rewrite would make the new mode permanently unreachable. A TOML
+> `permission_mode = "auto"` is never rewritten: it now means the CLI's auto
+> mode and logs a one-shot `claude.permission_mode.auto_semantics_changed`
+> WARN.
+
+**Interaction with `--permission-prompt-tool stdio`.** Untether passes the
+prompt tool alongside *every* mode, and the two compose rather than conflict:
+
+* Modes that prompt (`default`, `manual`, `plan`) raise a `control_request`
+  for each gated tool, which becomes a Telegram approval.
+* Modes that don't prompt for routine work (`acceptEdits`, `auto`) raise no
+  `control_request` for the actions they auto-approve. `diff_preview` is
+  therefore inert in those modes — it has been inert under `acceptEdits`
+  since it shipped, and `auto` behaves the same way.
+* **`AskUserQuestion` still raises a `can_use_tool` control_request in `auto`
+  mode** (probed on 2.1.228 against Untether's exact argv), so ask-mode option
+  buttons keep working. This was the load-bearing question for
+  [#741](https://github.com/littlebearapps/untether/issues/741): adopting
+  upstream `auto` does not cost Untether its interactivity.
+* `ExitPlanMode` does not arise in `auto` — there is no plan gate — so the
+  outline gate and `_DISCUSS_APPROVED` machinery apply to `plan` / `plan-auto`
+  only.
+* When auto mode's classifier blocks an action 3 times consecutively or 20
+  times in total, Claude Code falls back to prompting; because Untether
+  supplies a prompt tool, that fallback surfaces as a normal Telegram
+  approval rather than a silently dropped action.
+
+Auto mode requires a supported model (Opus 4.6+/Sonnet 4.6+/Fable 5) and an
+organisation that has not set `permissions.disableAutoMode`. Where it is
+unavailable the CLI rejects `--permission-mode auto` at startup with rc=1 and
+a stderr message, which Untether surfaces through the normal fatal-error path.
 
 ---
 
