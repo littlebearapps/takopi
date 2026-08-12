@@ -4,19 +4,34 @@ from __future__ import annotations
 
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...logging import get_logger
+from ...runners.run_options import CLAUDE_PLAN_AUTO_MODE, claude_cli_permission_mode
 
 logger = get_logger(__name__)
 
 PLANMODE_USAGE = (
-    "usage: `/planmode`, `/planmode on`, `/planmode auto`, `/planmode off`,"
-    " `/planmode show`, or `/planmode clear`"
+    "usage: `/planmode`, `/planmode on`, `/planmode plan-auto`,"
+    " `/planmode auto`, `/planmode off`, `/planmode show`, or"
+    " `/planmode clear`"
 )
 
+# #741 `plan-auto` is Untether's own sugar (CLI plan mode + auto-approved
+# ExitPlanMode).  `auto` is now the CLI's native classifier-gated mode, which
+# this command shadowed until 0.35.5rc8.
 PERMISSION_MODES = {
     "on": "plan",
+    "plan-auto": CLAUDE_PLAN_AUTO_MODE,
     "auto": "auto",
     "off": "acceptEdits",
 }
+
+_MODE_LABELS = {
+    "plan": "<b>on</b> (plan mode)",
+    CLAUDE_PLAN_AUTO_MODE: ("<b>plan-auto</b> (plan mode, auto-approve ExitPlanMode)"),
+    "auto": "<b>auto</b> (Claude Code auto mode — classifier-gated)",
+}
+
+# Modes that mean "planning is active" for the bare `/planmode` toggle.
+_PLANNING_MODES = ("plan", CLAUDE_PLAN_AUTO_MODE)
 
 # Engines that support the /planmode command (Claude-style permission modes).
 # Codex and Gemini have approval policies but use different semantics —
@@ -64,10 +79,8 @@ class PlanModeCommand:
         if args == "show":
             current = await chat_prefs.get_engine_override(chat_id, engine)
             mode = current.permission_mode if current else None
-            if mode == "plan":
-                label = "<b>on</b> (plan mode)"
-            elif mode == "auto":
-                label = "<b>auto</b> (plan mode, auto-approve ExitPlanMode)"
+            if mode in _MODE_LABELS:
+                label = _MODE_LABELS[mode]
             elif mode is not None:
                 label = f"<b>off</b> ({mode})"
             else:
@@ -80,7 +93,7 @@ class PlanModeCommand:
             # Toggle: if currently plan/auto mode, turn off; otherwise turn on
             current = await chat_prefs.get_engine_override(chat_id, engine)
             current_mode = current.permission_mode if current else None
-            args = "off" if current_mode in ("plan", "auto") else "on"
+            args = "off" if current_mode in _PLANNING_MODES else "on"
 
         if args in PERMISSION_MODES:
             mode = PERMISSION_MODES[args]
@@ -100,7 +113,7 @@ class PlanModeCommand:
                 budget_auto_cancel=current.budget_auto_cancel if current else None,
             )
             await chat_prefs.set_engine_override(chat_id, engine, updated)
-            cli_mode = "plan" if mode in ("plan", "auto") else mode
+            cli_mode = claude_cli_permission_mode(mode)
             logger.info(
                 "planmode.set",
                 chat_id=chat_id,

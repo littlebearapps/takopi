@@ -130,7 +130,11 @@ class TestToasts:
         assert ConfigCommand.early_answer_toast("pm:off") == "Plan mode: off"
 
     def test_toast_planmode_auto(self):
-        assert ConfigCommand.early_answer_toast("pm:auto") == "Plan mode: auto"
+        # #741 `auto` is now Claude Code's own auto mode, not plan mode.
+        assert ConfigCommand.early_answer_toast("pm:auto") == "Permission mode: auto"
+
+    def test_toast_planmode_plan_auto(self):
+        assert ConfigCommand.early_answer_toast("pm:pa") == "Plan mode: plan-auto"
 
     def test_toast_planmode_clear(self):
         assert ConfigCommand.early_answer_toast("pm:clr") == "Permission mode: cleared"
@@ -300,8 +304,13 @@ class TestPlanMode:
         await cmd.handle(ctx)
         ctx.executor.edit.assert_called_once()
         msg = _last_edit_msg(ctx)
-        assert "Plan mode" in msg.text
-        assert "config:pm:on" in _buttons_data(msg)
+        # #741 retitled: the page now also offers Claude Code's own auto mode,
+        # which is not a plan mode.
+        assert "Permission mode" in msg.text
+        data = _buttons_data(msg)
+        assert "config:pm:on" in data
+        assert "config:pm:pa" in data
+        assert "config:pm:auto" in data
 
     @pytest.mark.anyio
     async def test_planmode_set_returns_home(self, tmp_path):

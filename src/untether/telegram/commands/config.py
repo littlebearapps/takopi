@@ -5,6 +5,7 @@ from __future__ import annotations
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...ids import DEPRECATED_ENGINES
 from ...logging import get_logger
+from ...runners.run_options import CLAUDE_PLAN_AUTO_MODE
 from ...transport import RenderedMessage
 
 logger = get_logger(__name__)
@@ -111,7 +112,8 @@ _HOME_HINTS: dict[str, dict[str, str]] = {
     "pm": {
         "on": "approve actions",
         "off": "run freely",
-        "auto": "auto-approve actions",
+        "plan-auto": "auto-approve plans",
+        "auto": "classifier-gated",
         "default": "agent decides",
         "full auto": "all tools approved",
         "safe": "untrusted tools blocked",
@@ -219,6 +221,8 @@ async def _page_home(ctx: CommandContext) -> None:
         if current_engine == "claude":
             if pm == "plan":
                 pm_label = "on"
+            elif pm == CLAUDE_PLAN_AUTO_MODE:
+                pm_label = "plan-auto"
             elif pm == "auto":
                 pm_label = "auto"
             elif pm is not None:
@@ -527,7 +531,14 @@ async def _page_home(ctx: CommandContext) -> None:
 # Plan mode
 # ---------------------------------------------------------------------------
 
-_PM_MODES: dict[str, str] = {"on": "plan", "auto": "auto", "off": "acceptEdits"}
+# #741 `pa` is Untether's plan-gate sugar (CLI plan + auto-approved
+# ExitPlanMode); `auto` is now Claude Code's own classifier-gated auto mode.
+_PM_MODES: dict[str, str] = {
+    "on": "plan",
+    "pa": CLAUDE_PLAN_AUTO_MODE,
+    "auto": "auto",
+    "off": "acceptEdits",
+}
 
 _CODEX_PM_MODES: dict[str, str] = {"fa": "auto", "safe": "safe"}
 
@@ -684,6 +695,8 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
     if engine == "claude":
         if pm == "plan":
             current_label = "on"
+        elif pm == CLAUDE_PLAN_AUTO_MODE:
+            current_label = "plan-auto"
         elif pm == "auto":
             current_label = "auto"
         elif pm is not None:
@@ -692,13 +705,15 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             current_label = "default"
 
         lines = [
-            "<b>📋 Plan mode</b>",
+            "<b>📋 Permission mode</b>",
             "",
-            "Review and approve each action before it runs.",
+            "How much Claude checks with you before acting.",
             "",
             "• <b>off</b> — run freely, no approval needed",
-            "• <b>on</b> — ask before every action (safest)",
-            "• <b>auto</b> — approve actions, ask before finalising plans",
+            "• <b>on</b> — plan mode; approve the plan before edits",
+            "• <b>plan-auto</b> — plan mode, plan approved automatically",
+            "• <b>auto</b> — Claude Code's own auto mode: a classifier"
+            " approves routine work and blocks risky actions",
             "",
             "ℹ️ <i>Default: uses Claude Code's own permission mode</i>",
             "",
@@ -720,9 +735,15 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             ],
             [
                 {
+                    "text": _check("Plan-auto", active=current_label == "plan-auto"),
+                    "callback_data": "config:pm:pa",
+                },
+                {
                     "text": _check("Auto", active=current_label == "auto"),
                     "callback_data": "config:pm:auto",
                 },
+            ],
+            [
                 {"text": "Clear override", "callback_data": "config:pm:clr"},
             ],
             [{"text": "← Back", "callback_data": "config:home"}],
@@ -2238,7 +2259,8 @@ class ConfigCommand:
             "pm": {
                 "on": "Plan mode: on",
                 "off": "Plan mode: off",
-                "auto": "Plan mode: auto",
+                "pa": "Plan mode: plan-auto",
+                "auto": "Permission mode: auto",
                 "clr": "Permission mode: cleared",
                 "fa": "Approval policy: full auto",
                 "ya": "Approval mode: full access",

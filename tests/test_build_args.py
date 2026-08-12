@@ -10,7 +10,10 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from untether.model import ResumeToken
+from untether.runners.run_options import CLAUDE_PLAN_AUTO_MODE
 from untether.runners.run_options import EngineRunOptions as RunOptions
 
 # ---------------------------------------------------------------------------
@@ -80,6 +83,67 @@ class TestClaudeBuildArgs:
         assert "--permission-mode" in args
         idx = args.index("--permission-mode")
         assert args[idx + 1] == "plan"
+
+    def _cli_mode_for(self, mode: str) -> str:
+        runner = self._runner()
+        from untether.runners.claude import ClaudeStreamState
+
+        state = ClaudeStreamState()
+        opts = RunOptions(permission_mode=mode)
+        with patch("untether.runners.claude.get_run_options", return_value=opts):
+            args = runner.build_args("hello", None, state=state)
+        return args[args.index("--permission-mode") + 1]
+
+    @pytest.mark.parametrize(
+        "mode",
+        ["default", "manual", "plan", "auto", "acceptEdits", "dontAsk"],
+    )
+    def test_genuine_cli_modes_pass_through_verbatim(self, mode: str) -> None:
+        """#741 every real CLI mode reaches the binary unmodified.
+
+        `auto` is the regression guard: until 0.35.5rc8 it was rewritten to
+        `plan`, which made Claude Code's own auto mode unreachable.
+        """
+        assert self._cli_mode_for(mode) == mode
+
+    def test_plan_auto_sugar_sends_plan(self) -> None:
+        """Untether's own `plan-auto` is the only translated value (#741)."""
+        assert self._cli_mode_for(CLAUDE_PLAN_AUTO_MODE) == "plan"
+
+    def test_permission_prompt_tool_still_set_in_auto(self) -> None:
+        """Auto mode keeps the stdio control channel wired.
+
+        Verified against CLI 2.1.228: an `AskUserQuestion` call still raises a
+        `can_use_tool` control_request in auto mode, so Telegram approval
+        buttons keep working. Dropping the flag would silently break that.
+        """
+        runner = self._runner()
+        from untether.runners.claude import ClaudeStreamState
+
+        state = ClaudeStreamState()
+        opts = RunOptions(permission_mode="auto")
+        with patch("untether.runners.claude.get_run_options", return_value=opts):
+            args = runner.build_args("hello", None, state=state)
+        idx = args.index("--permission-prompt-tool")
+        assert args[idx + 1] == "stdio"
+
+    def test_auto_does_not_arm_exit_plan_mode_rubber_stamp(self) -> None:
+        """The security half of #741.
+
+        Upstream `auto` has no plan gate, so it must not set the flag that
+        auto-approves `ExitPlanMode` and (via #283) bypasses downstream diff
+        previews. Only `plan-auto` may do that.
+        """
+        runner = self._runner()
+        opts = RunOptions(permission_mode="auto")
+        with patch("untether.runners.claude.get_run_options", return_value=opts):
+            state = runner.new_state("hello", None)
+        assert state.auto_approve_exit_plan_mode is False
+
+        opts = RunOptions(permission_mode=CLAUDE_PLAN_AUTO_MODE)
+        with patch("untether.runners.claude.get_run_options", return_value=opts):
+            state = runner.new_state("hello", None)
+        assert state.auto_approve_exit_plan_mode is True
 
     def test_allowed_tools(self) -> None:
         from untether.runners.claude import DEFAULT_ALLOWED_TOOLS

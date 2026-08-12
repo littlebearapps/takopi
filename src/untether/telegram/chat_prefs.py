@@ -7,7 +7,11 @@ import msgspec
 from ..context import RunContext
 from ..logging import get_logger
 from ..transport import ChannelId
-from .engine_overrides import EngineOverrides, normalize_overrides
+from .engine_overrides import (
+    EngineOverrides,
+    migrate_legacy_overrides,
+    normalize_overrides,
+)
 from .state_store import JsonStateStore
 
 logger = get_logger(__name__)
@@ -201,7 +205,9 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
             if chat is None:
                 return None
             override = chat.engine_overrides.get(engine_key)
-            return normalize_overrides(override)
+            # #741 stored Claude `auto` predates the plan-auto rename; migrate
+            # on read so an existing chat keeps the behaviour it opted into.
+            return migrate_legacy_overrides(engine_key, normalize_overrides(override))
 
     async def set_engine_override(
         self, chat_id: ChannelId, engine: str, override: EngineOverrides | None

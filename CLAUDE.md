@@ -12,7 +12,7 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **Interactive permission control** — bidirectional Telegram buttons for tool approval, plan mode, and clarifying questions
 - **Pause & Outline Plan** — third button on plan approval; the outline (chat text, or the ExitPlanMode `plan` input on plan-file CLIs, #659) is posted with Approve/Deny/Let's discuss buttons (hold-open keeps session alive while user reads); the v2.1.72-74-era progressive cooldown was retired in #570 (upstream retry loop fixed, verified on CLI 2.1.215)
 - **Agent context preamble** — configurable prompt preamble tells agents they're on Telegram and requests structured end-of-task summaries; `[preamble]` config section
-- **`/planmode`** — toggle permission mode per chat (on/off/auto)
+- **`/planmode`** — toggle permission mode per chat (on/plan-auto/auto/off). `auto` is Claude Code's own classifier-gated auto mode; `plan-auto` is Untether's plan-gate sugar, renamed from `auto` in 0.35.5rc8 because it shadowed the CLI's mode (#741). Full mode table in `docs/reference/runners/claude/runner.md` → "Permission modes"
 - **`/listen`** — set listen mode (`all` / `mentions`) per chat or topic; controls when the bot responds in groups; renamed from `/trigger` in v0.35.3 (#297) to disambiguate from webhook/cron triggers — `/trigger` still works as a deprecated alias for one release cycle
 - **Ask mode** — interactive AskUserQuestion with option buttons, sequential multi-question flows, and `/config` toggle; Claude-only
 - **Early callback answering** — clears button spinners immediately instead of waiting for processing
@@ -216,7 +216,7 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 
 ## Tests
 
-3161 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
+3222 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
 
 Key test files:
 
@@ -243,7 +243,8 @@ Key test files:
 - `test_pi_compaction.py` — 6 tests: compaction start/end, aborted, no tokens, sequence
 - `test_proc_diag.py` — 56 tests: format_diag, is_cpu_active, collect_proc_diag (Linux /proc reads), ProcessDiag defaults, macOS ps backend (TIME parser, process table, tree CPU, dispatch — #689), read_cmdline_argv
 - `test_exec_runner.py` — 50 tests: event tracking (event_count, recent_events ring buffer, PID in StartedEvent meta), JsonlStreamState defaults, watchdog approval-pending discriminator (registry probe first, non-positional ring scan fallback, same-tick `rate_limit_event`, #697)
-- `test_build_args.py` — 59 tests: CLI argument construction for all 6 engines, model/reasoning/permission flags
+- `test_build_args.py` — 68 tests: CLI argument construction for all 6 engines, model/reasoning/permission flags, verbatim pass-through of every genuine Claude permission mode (#741)
+- `test_claude_permission_modes.py` — 42 tests: Claude permission-mode semantics against CLI 2.1.228 — `auto` pass-through vs the `plan-auto` sugar, allowlist contents (incl. `manual`/`dontAsk`, and `default` which the CLI still accepts), cron↔`[engines.claude]` accept/reject parity, chat-pref migration of the legacy `auto` spelling, one-shot TOML WARN, plus a drift test that re-derives the mode set from the installed binary (#741/#742)
 - `test_telegram_files.py` — 17 tests: file helpers, deduplication, deny globs, default upload paths
 - `test_telegram_file_transfer_helpers.py` — 50 tests: `/file put` and `/file get` command handling, media groups, force overwrite
 - `test_loop_coverage.py` — 42 tests: update loop edge cases, message routing, callback dispatch, shutdown integration

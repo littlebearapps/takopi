@@ -102,10 +102,30 @@ def _format_answered_echo(text: str) -> str:
 def _chat_session_key(
     msg: TelegramIncomingMessage, *, store: ChatSessionStore | None
 ) -> tuple[int, int | None] | None:
-    if store is None or msg.thread_id is not None:
+    """Resolve the ``(chat_id, owner)`` key chat-mode sessions persist under.
+
+    The second slot is a per-chat-type scope, not a single identity:
+
+    * private chat, main thread — ``None`` (one session for the whole chat)
+    * private chat, topic — the ``thread_id``, so each topic resumes
+      independently (#734).  Telegram's private-chat topics carry a
+      ``message_thread_id`` but are not forum topics, so ``TopicStateStore``
+      never claims them; returning ``None`` here dropped their resume token
+      entirely and every follow-up started a fresh agent session.
+    * group / supergroup, topic — ``None``, because ``TopicStateStore`` owns
+      forum topics (and wins on read, see ``ResumeResolver``)
+    * group / supergroup, no topic — the ``sender_id``
+
+    The slots can't collide: a chat is either private or a group, so a given
+    ``chat_id`` only ever uses one of the thread-scoped and sender-scoped
+    forms.
+    """
+    if store is None:
         return None
     if msg.chat_type == "private":
-        return (msg.chat_id, None)
+        return (msg.chat_id, msg.thread_id)
+    if msg.thread_id is not None:
+        return None
     if msg.sender_id is None:
         return None
     return (msg.chat_id, msg.sender_id)
