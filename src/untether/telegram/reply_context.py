@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from html import escape
 from unicodedata import category
 
-__all__ = ["REPLY_CONTEXT_MAX_CHARS", "append_reply_context"]
+__all__ = [
+    "REPLY_CONTEXT_MAX_CHARS",
+    "append_reply_context",
+    "strip_reply_routing_lines",
+]
 
 REPLY_CONTEXT_MAX_CHARS = 4_000
 _TRUNCATION_MARKER = "\n[… reply context truncated by Untether …]"
@@ -44,13 +49,12 @@ def append_reply_context(
     *,
     selected_quote: str | None,
     reply_text: str | None,
-    omit_full_reply: bool = False,
 ) -> str:
     """Append bounded Telegram reply data without exposing it to routing parsers."""
     if selected_quote is not None:
         tag = "selected_quote"
         reference = selected_quote
-    elif not omit_full_reply and reply_text is not None:
+    elif reply_text is not None:
         tag = "replied_message"
         reference = reply_text
     else:
@@ -69,3 +73,17 @@ def append_reply_context(
     if not prompt:
         return block
     return f"{prompt}\n\n{block}"
+
+
+def strip_reply_routing_lines(
+    text: str | None,
+    *,
+    is_resume_line: Callable[[str], bool],
+) -> str | None:
+    """Remove resume-only routing metadata while preserving reply content."""
+    if text is None:
+        return None
+    reference = "\n".join(
+        line for line in text.splitlines() if not is_resume_line(line)
+    ).strip()
+    return reference or None

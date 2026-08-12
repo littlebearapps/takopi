@@ -60,7 +60,7 @@ from .context import _merge_topic_context, _usage_ctx_set, _usage_topic
 from .engine_defaults import resolve_engine_for_message
 from .engine_overrides import merge_overrides
 from .listen_mode import resolve_listen_mode, should_trigger_run
-from .reply_context import append_reply_context
+from .reply_context import append_reply_context, strip_reply_routing_lines
 from .topic_state import TopicStateStore, resolve_state_path
 from .topics import (
     _maybe_rename_topic,
@@ -1023,7 +1023,6 @@ class ResumeResolver:
         prompt_text: str,
         reply_quote_text: str | None = None,
         reply_reference_text: str | None = None,
-        reply_to_is_bot: bool | None = None,
     ) -> ResumeDecision:
         if resume_token is not None:
             return ResumeDecision(
@@ -1037,8 +1036,10 @@ class ResumeResolver:
                 prompt_text = append_reply_context(
                     prompt_text,
                     selected_quote=reply_quote_text,
-                    reply_text=reply_reference_text,
-                    omit_full_reply=reply_to_is_bot is True,
+                    reply_text=strip_reply_routing_lines(
+                        reply_reference_text,
+                        is_resume_line=self._cfg.runtime.is_resume_line,
+                    ),
                 )
                 self._task_group.start_soon(
                     send_with_resume,
@@ -2214,7 +2215,6 @@ async def run_main_loop(
                     prompt_text=prompt_text,
                     reply_quote_text=msg.reply_quote_text,
                     reply_reference_text=reply_reference_text,
-                    reply_to_is_bot=msg.reply_to_is_bot,
                 )
                 if resume_decision.handled_by_running_task:
                     return
@@ -2222,8 +2222,10 @@ async def run_main_loop(
                 prompt_text = append_reply_context(
                     prompt_text,
                     selected_quote=msg.reply_quote_text,
-                    reply_text=reply_reference_text,
-                    omit_full_reply=resume_token is not None,
+                    reply_text=strip_reply_routing_lines(
+                        reply_reference_text,
+                        is_resume_line=cfg.runtime.is_resume_line,
+                    ),
                 )
                 if resume_token is None:
                     await run_job(

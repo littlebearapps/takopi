@@ -1,6 +1,7 @@
 from untether.telegram.reply_context import (
     REPLY_CONTEXT_MAX_CHARS,
     append_reply_context,
+    strip_reply_routing_lines,
 )
 
 
@@ -58,3 +59,23 @@ def test_append_reply_context_replaces_control_and_format_characters() -> None:
     assert "\x7f" not in prompt
     assert "\x85" not in prompt
     assert "\u202e" not in prompt
+
+
+def test_strip_reply_routing_lines_preserves_content_and_removes_footer() -> None:
+    def is_resume_line(line: str) -> bool:
+        return "codex resume" in line
+
+    assert (
+        strip_reply_routing_lines(
+            "full bot response\n\n↩️ `codex resume session-1`",
+            is_resume_line=is_resume_line,
+        )
+        == "full bot response"
+    )
+    assert (
+        strip_reply_routing_lines(
+            "`codex resume session-1`",
+            is_resume_line=is_resume_line,
+        )
+        is None
+    )
