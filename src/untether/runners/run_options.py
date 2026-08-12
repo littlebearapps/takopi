@@ -66,10 +66,13 @@ CLAUDE_CLI_PERMISSION_MODES: frozenset[str] = frozenset(
 CLAUDE_PLAN_AUTO_MODE = "plan-auto"
 
 # The pre-0.35.5rc8 spelling of :data:`CLAUDE_PLAN_AUTO_MODE`.  Still present
-# in ``chat_prefs.json`` on deployed hosts; migrated on read (see
-# ``telegram/engine_overrides.migrate_legacy_permission_mode``).  In
-# TOML-authored config it is NOT rewritten — it now means the CLI's own
-# ``auto`` and a one-shot startup WARN says so.
+# in ``chat_prefs.json`` on deployed hosts; rewritten there exactly once, at
+# first load, by ``ChatPrefsStore._migrate_permission_modes_locked``.  The
+# one-shot guard matters: after the rename a user can legitimately *choose*
+# ``auto`` from ``/planmode`` or ``/config``, so a per-read rewrite would make
+# the CLI's own mode unreachable through the UI.  In TOML-authored config the
+# value is NOT rewritten — it now means the CLI's own ``auto`` and a one-shot
+# startup WARN says so.
 LEGACY_CLAUDE_PLAN_AUTO_MODE = "auto"
 
 # Canonical per-engine permission_mode value sets. Used by trigger config

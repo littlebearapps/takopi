@@ -132,9 +132,14 @@ reaches the CLI verbatim.
 
 > **Renamed in 0.35.5rc8 ([#741](https://github.com/littlebearapps/untether/issues/741)).**
 > `plan-auto` was spelled `auto` until 0.35.5rc7, which shadowed the CLI's own
-> `auto` mode and made it unreachable. Stored chat prefs are migrated on read;
-> a TOML `permission_mode = "auto"` now means the CLI's auto mode and logs a
-> one-shot `claude.permission_mode.auto_semantics_changed` WARN.
+> `auto` mode and made it unreachable. Stored chat prefs are rewritten once,
+> at first load, guarded by a `permission_mode_migrated` flag in
+> `telegram_chat_prefs_state.json` — it must be one-shot, because after the
+> rename `auto` is a value the user can legitimately *choose* from the UI, and
+> a per-read rewrite would make the new mode permanently unreachable. A TOML
+> `permission_mode = "auto"` is never rewritten: it now means the CLI's auto
+> mode and logs a one-shot `claude.permission_mode.auto_semantics_changed`
+> WARN.
 
 **Interaction with `--permission-prompt-tool stdio`.** Untether passes the
 prompt tool alongside *every* mode, and the two compose rather than conflict:

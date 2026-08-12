@@ -278,6 +278,119 @@ def test_chat_prefs_auto_migrates_to_plan_auto() -> None:
     assert migrated.permission_mode == CLAUDE_PLAN_AUTO_MODE
 
 
+# ---------------------------------------------------------------------------
+# #741 — the migration must be ONE-SHOT, not applied on every read
+# ---------------------------------------------------------------------------
+
+
+def _write_prefs(path, *, mode: str, migrated_flag: bool | None) -> None:
+    import json
+
+    payload = {
+        "version": 1,
+        "chats": {
+            "-100": {
+                "default_engine": None,
+                "trigger_mode": None,
+                "context_project": None,
+                "context_branch": None,
+                "engine_overrides": {"claude": {"permission_mode": mode}},
+            }
+        },
+    }
+    if migrated_flag is not None:
+        payload["permission_mode_migrated"] = migrated_flag
+    path.write_text(json.dumps(payload))
+
+
+@pytest.mark.anyio
+async def test_legacy_prefs_file_is_migrated_once(tmp_path) -> None:
+    """A pre-0.35.5rc8 file (no marker) has `auto` rewritten to `plan-auto`."""
+    from untether.telegram.chat_prefs import ChatPrefsStore
+
+    path = tmp_path / "telegram_chat_prefs_state.json"
+    _write_prefs(path, mode="auto", migrated_flag=None)
+
+    store = ChatPrefsStore(path)
+    override = await store.get_engine_override(-100, "claude")
+    assert override is not None
+    assert override.permission_mode == CLAUDE_PLAN_AUTO_MODE
+
+    # The rewrite is persisted, and the marker stops it running again.
+    import json
+
+    saved = json.loads(path.read_text())
+    assert saved["permission_mode_migrated"] is True
+    assert (
+        saved["chats"]["-100"]["engine_overrides"]["claude"]["permission_mode"]
+        == CLAUDE_PLAN_AUTO_MODE
+    )
+
+
+@pytest.mark.anyio
+async def test_auto_chosen_after_migration_is_preserved(tmp_path) -> None:
+    """The live regression this replaced a read-time rewrite to fix (#741).
+
+    Once the file is marked migrated, `auto` is a value the user can pick from
+    `/planmode` or `/config` to mean Claude Code's own auto mode. A read-time
+    rewrite sent it straight back to `plan-auto`, so the new mode was
+    unreachable through the UI — caught on `@untether_dev_bot`, where pressing
+    **Auto** still spawned `--permission-mode plan`.
+    """
+    from untether.telegram.chat_prefs import ChatPrefsStore
+
+    path = tmp_path / "telegram_chat_prefs_state.json"
+    _write_prefs(path, mode="auto", migrated_flag=True)
+
+    store = ChatPrefsStore(path)
+    override = await store.get_engine_override(-100, "claude")
+    assert override is not None
+    assert override.permission_mode == "auto"
+
+
+@pytest.mark.anyio
+async def test_auto_written_after_migration_survives_a_reload(tmp_path) -> None:
+    """End-to-end: choose `auto`, reload from disk, still `auto`."""
+    from untether.telegram.chat_prefs import ChatPrefsStore
+    from untether.telegram.engine_overrides import EngineOverrides
+
+    path = tmp_path / "telegram_chat_prefs_state.json"
+    _write_prefs(path, mode="auto", migrated_flag=None)
+
+    store = ChatPrefsStore(path)
+    # First read migrates the legacy value...
+    first = await store.get_engine_override(-100, "claude")
+    assert first is not None
+    assert first.permission_mode == CLAUDE_PLAN_AUTO_MODE
+
+    # ...then the user deliberately selects upstream auto.
+    await store.set_engine_override(
+        -100, "claude", EngineOverrides(permission_mode="auto")
+    )
+
+    reloaded = ChatPrefsStore(path)
+    override = await reloaded.get_engine_override(-100, "claude")
+    assert override is not None
+    assert override.permission_mode == "auto"
+
+
+@pytest.mark.anyio
+async def test_migration_marks_a_clean_file_without_touching_values(tmp_path) -> None:
+    from untether.telegram.chat_prefs import ChatPrefsStore
+
+    path = tmp_path / "telegram_chat_prefs_state.json"
+    _write_prefs(path, mode="plan", migrated_flag=None)
+
+    store = ChatPrefsStore(path)
+    override = await store.get_engine_override(-100, "claude")
+    assert override is not None
+    assert override.permission_mode == "plan"
+
+    import json
+
+    assert json.loads(path.read_text())["permission_mode_migrated"] is True
+
+
 def test_migration_preserves_other_override_fields() -> None:
     from untether.telegram.engine_overrides import (
         EngineOverrides,
