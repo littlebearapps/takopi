@@ -146,6 +146,11 @@ _CODEX_TOOL_ITEM_TYPES = frozenset(
 )
 _OPENCODE_TOOL_STATUSES = frozenset({"completed", "error"})
 
+# #716: the terminal frame of a run. Latched onto ``saw_result`` so
+# "did this run reach its result?" is answerable independently of the
+# running ``last_event_type`` — see ``JsonlStreamState.saw_result``.
+_RESULT_EVENT_TYPE = "result"
+
 # #502: control-channel traffic is stdin/stdout permission-flow (Claude
 # control_request → Untether stdin control_response, and parent-initiated
 # requests like mcp_status). Skip when computing last_event_type so the
@@ -161,24 +166,55 @@ _CONTROL_CHANNEL_EVENT_TYPES = frozenset({"control_request", "control_response"}
 _APPROVAL_PENDING_REFIRE_S = 1800.0
 
 
-def _recent_event_is_control_request(stream: JsonlStreamState) -> bool:
-    """True if the most recent JSONL event in the ring buffer is a
-    Claude ``control_request`` frame — i.e. the session is awaiting an
-    approval response on the control channel.
+# #697: ring-buffer labels that mean an outstanding approval has been
+# resolved — the tool ran (its ``tool_result`` arrives as a ``user`` frame),
+# the turn ended, or Claude answered on the control channel. Every other
+# label (``rate_limit_event``, ``assistant``, ``tool:*``, ``system``) is
+# transparent to the backward scan below.
+_APPROVAL_RESOLVING_EVENT_LABELS = frozenset({"control_response", "user", "result"})
 
-    Used by ``_watchdog_loop`` to demote ``subprocess.liveness_stall``
+
+def _approval_pending(stream: JsonlStreamState, logger: Any = None) -> bool:
+    """True while the subprocess is awaiting a user approval on the control
+    channel, rather than genuinely hung.
+
+    Used by ``_subprocess_watchdog`` to demote ``subprocess.liveness_stall``
     WARN → ``subprocess.approval_pending`` INFO, mirroring the bridge-side
-    behaviour added in rc19. The bridge-side predicate inspects the
-    inline-keyboard payload of the most recent action; the watchdog has
-    no access to bridge state, so it consults the JSONL event stream
-    directly. Both signals agree in the common case where Claude emitted
-    a ``control_request`` and we're waiting for the user to click a
-    button (or otherwise resolve the approval).
+    ``ProgressEdits._has_pending_approval``.
+
+    Two signals, in order of authority:
+
+    1. The engine's own unanswered-control-request registry, reached by the
+       same ``engine_state`` duck-typing the bridge uses (Claude's
+       ``awaiting_user_approval`` → ``pending_control_requests_for_session``).
+       It is self-cleaning and does not go stale during a long approval wait.
+       Engines with no control channel simply have no probe.
+    2. A backward scan of the JSONL ring buffer, kept as a True-only
+       fallback for the same reason the bridge keeps its presentation-state
+       check.
+
+    #697: the scan replaces a check on ``recent_events[-1]``, which was
+    positional — on nsd a ``rate_limit_event`` arriving in the same tick as
+    the ``control_request`` took the last slot and flipped a 10-minute
+    approval wait back to a WARN (``approval_pending=False``). That branch
+    latches ``liveness_warned``, burning the run's one-shot stall canary,
+    and falls through to the auto-kill check.
     """
-    if not stream.recent_events:
-        return False
-    _, label = stream.recent_events[-1]
-    return label == "control_request"
+    es = getattr(stream, "engine_state", None)
+    probe = getattr(es, "awaiting_user_approval", None)
+    if callable(probe):
+        try:
+            if probe():
+                return True
+        except Exception as exc:  # noqa: BLE001 - watchdog must not die
+            if logger is not None:
+                logger.debug("subprocess.approval_probe_failed", error=str(exc))
+    for _, label in reversed(stream.recent_events):
+        if label == "control_request":
+            return True
+        if label in _APPROVAL_RESOLVING_EVENT_LABELS:
+            return False
+    return False
 
 
 def _classify_jsonl_event(raw: Any) -> str:
@@ -338,6 +374,28 @@ class JsonlStreamState:
     last_stdout_at: float = 0.0
     last_event_type: str | None = None
     last_event_tool: str | None = None
+    # #716: monotonic latch — True once a ``result`` frame has been parsed.
+    #
+    # ``last_event_type`` is a *running* value overwritten by every non-
+    # control-channel frame, so it answers "what was the last frame we saw?"
+    # and NOT "did this run reach its result?". Those come apart in practice:
+    # 106 healthy (``ok=True``, uncancelled) Claude runs on nsd logged
+    # ``session.summary last_event_type=user``, which is the exact value
+    # ``_should_auto_continue`` treats as its salvage trigger.
+    #
+    # Note the mechanism is NOT a frame arriving after the terminal
+    # ``result`` — that is measurably impossible on this path, because the
+    # ``result`` frame's CompletedEvent sets ``did_emit_completed`` and both
+    # ``_iter_jsonl_events`` overrides break out of the read loop
+    # immediately (verified against the real ClaudeRunner with the
+    # ``trailing_user_after_result`` fake-CLI scenario: the trailing frame
+    # does not even reach ``recent_events``). A ``user`` value on a completed
+    # run therefore means the result frame never landed on THIS stream
+    # object. Whatever the upstream reason, the discriminator the salvage
+    # predicate needs is "was a result parsed", which is what this latch
+    # records — set-only, so it states a fact about the run rather than
+    # about frame ordering.
+    saw_result: bool = False
     event_count: int = 0
     recent_events: deque[tuple[float, str]] = field(
         default_factory=lambda: deque(maxlen=10)
@@ -937,6 +995,10 @@ class JsonlSubprocessRunner(BaseRunner):
             if etype not in _CONTROL_CHANNEL_EVENT_TYPES:
                 stream.last_event_type = etype
                 stream.last_event_tool = etool
+            # #716: latch the terminal frame separately from the running
+            # ``last_event_type``. Set-only — never cleared.
+            if etype == _RESULT_EVENT_TYPE:
+                stream.saw_result = True
             label = f"tool:{etool}" if etool else etype
             stream.recent_events.append((now, label))
             # Stuck-after-tool_result tracking (#322). The latch persists across
@@ -1197,16 +1259,15 @@ class JsonlSubprocessRunner(BaseRunner):
             ):
                 idle = time.monotonic() - stream.last_stdout_at
                 if idle >= self._LIVENESS_TIMEOUT_SECONDS:
-                    # #526 rc20 follow-up: when the most recent JSONL
-                    # event is a ``control_request``, the subprocess
-                    # is awaiting a user approval — emit a paced
+                    # #526 rc20 follow-up: when the subprocess is awaiting a
+                    # user approval on the control channel, emit a paced
                     # ``subprocess.approval_pending`` INFO instead of
                     # the ``subprocess.liveness_stall`` WARN. Skip the
                     # auto-kill branch entirely (approval-waiting is
                     # by definition not a hang). Without latching
                     # ``liveness_warned`` so a later genuine hang
                     # (post-approval) can still fire the WARN.
-                    if _recent_event_is_control_request(stream):
+                    if _approval_pending(stream, logger):
                         now = time.monotonic()
                         if (
                             last_approval_pending_emit_at == 0.0

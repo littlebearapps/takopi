@@ -186,6 +186,7 @@ class TelegramBridgeConfig:
     # #638: optional ISO-639-1 hint forwarded to the transcription API.
     voice_transcription_language: str | None = None
     # #691: optional vocabulary/context hint forwarded to the provider.
+    # #691: optional vocabulary-bias prompt forwarded to the STT API.
     voice_transcription_prompt: str | None = None
     voice_show_transcription: bool = True
     # #381: CIDR/IP allowlist strings for the voice base_url SSRF check.

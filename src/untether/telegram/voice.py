@@ -15,7 +15,41 @@ from .types import TelegramIncomingMessage
 
 logger = get_logger(__name__)
 
-__all__ = ["transcribe_voice"]
+__all__ = [
+    "DEFAULT_VOICE_TRANSCRIPTION_PROMPT",
+    "resolve_transcription_prompt",
+    "transcribe_voice",
+]
+
+# #703: #691 shipped `voice_transcription_prompt` correctly but NO host set it,
+# so the vocabulary bias was inert everywhere and "trollo" kept arriving. A
+# shipped default fixes the common case on upgrade with no per-host TOML edit.
+#
+# Deliberately PRODUCT-GENERIC: engine names, the tool's own nouns, and the
+# release vocabulary every Untether user speaks. Deployment-specific terms
+# (project names, hostnames, third-party tools) stay the operator's job — a
+# fleet's own nouns don't belong in a PyPI wheel, and every extra term widens
+# the hallucination surface on short or silent clips. These are also the words
+# that carry the *referent* of a spoken instruction ("run it on Codex"), so
+# they're the highest-value ones to protect.
+DEFAULT_VOICE_TRANSCRIPTION_PROMPT = (
+    "Untether, Telegram, Claude Code, Codex, OpenCode, Gemini, Amp, Pi, "
+    "MCP, CLI, repo, changelog, PyPI"
+)
+
+
+def resolve_transcription_prompt(configured: str | None) -> str | None:
+    """#703: map the configured value onto the prompt actually sent.
+
+    - ``None`` (key absent) → the shipped default
+    - ``""`` (explicitly empty) → ``None``, i.e. omit the parameter entirely
+    - anything else → itself, verbatim (an override REPLACES the default; it
+      does not merge, so the operator's token budget stays theirs to spend)
+    """
+    if configured is None:
+        return DEFAULT_VOICE_TRANSCRIPTION_PROMPT
+    return configured or None
+
 
 VOICE_TRANSCRIPTION_DISABLED_HINT = (
     "voice transcription is disabled. enable it in config:\n"
@@ -73,6 +107,8 @@ class OpenAIVoiceTranscriber:
         # #638: only include `language` when configured — omitting the kwarg
         # entirely preserves the API's auto-detect for unset configs (passing
         # None would serialise a null the endpoint may reject).
+        # #691: same for `prompt` (vocabulary bias) — some OpenAI-compatible
+        # endpoints 400 on unknown multipart fields rather than ignoring them.
         extra: dict[str, str] = {}
         if language is not None:
             extra["language"] = language
@@ -165,11 +201,15 @@ async def transcribe_voice(
             audio_bytes=audio_bytes,
             language=language,
             prompt=prompt,
+            model=model, audio_bytes=audio_bytes, language=language, prompt=prompt
         )
         logger.debug(
             "voice.transcribe.success",
             model=model,
             language=language,
+            # #691: never log the prompt text itself — operators may put
+            # project/client names in it.
+            prompt_configured=prompt is not None,
             audio_size=len(audio_bytes),
         )
         return text

@@ -64,7 +64,7 @@ When you tap a setting button:
 
 Some settings have more than two states and use a different layout:
 
-- **Plan mode** — three options (off / on / auto) shown as separate buttons in a 2+1 split: `[Off] [On]` on the first row, `[Auto] [Clear override]` on the second
+- **Permission mode** (Claude Code) — four options shown in a 2+2+1 split: `[Off] [On]` on the first row, `[Plan-auto] [Auto]` on the second, `[Clear override]` on the third
 - **Approval mode** (Gemini) — three options (read-only / edit files / full access)
 - **Effort** (Claude Code) — low / medium / high / xhigh / max
 - **Reasoning** (Codex) — minimal / low / medium / high / xhigh
@@ -88,7 +88,7 @@ When you switch engines via the Engine & model page, the home page automatically
 
 | Setting | Options | Persisted |
 |---------|---------|-----------|
-| Plan mode | off, on, auto | Yes (chat prefs) |
+| Permission mode | off, on, plan-auto, auto | Yes (chat prefs) |
 | Approval policy | full auto, safe | Yes (chat prefs) |
 | Approval mode | read-only, edit files, full access | Yes (chat prefs) |
 | Ask mode | off, on | Yes (chat prefs) |

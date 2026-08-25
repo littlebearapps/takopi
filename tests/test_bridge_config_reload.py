@@ -72,6 +72,7 @@ class TestUpdateFrom:
             voice_show_transcription=False,
             voice_transcription_language="EN",
             voice_transcription_prompt="Qdrant, Bernstein",
+            voice_transcription_prompt=" Trello, Untether ",
             show_resume_line=False,
             forward_coalesce_s=3.5,
             media_group_debounce_s=2.5,
@@ -87,6 +88,8 @@ class TestUpdateFrom:
         # #638: hot-reloadable, normalised to lowercase at parse time
         assert cfg.voice_transcription_language == "en"
         assert cfg.voice_transcription_prompt == "Qdrant, Bernstein"
+        # #691: hot-reloadable, stripped at parse time
+        assert cfg.voice_transcription_prompt == "Trello, Untether"
         # #378: SecretStr — compare via .get_secret_value() since equality
         # against a bare str returns False.
         assert cfg.voice_transcription_api_key is not None

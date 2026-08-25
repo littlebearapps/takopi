@@ -64,8 +64,8 @@ For each pattern:
 - **Canonical**: `register_ephemeral_message` + `ProgressEdits.delete_ephemeral()`
 - **Posture**: regression-watch — every run handler must drain ephemerals in `finally`.
 
-### 10. Session registry cleanup miss (PTY/cooldown/ask)
-- **Sig**: `_SESSION_STDIN`, `_REQUEST_TO_SESSION`, `_DISCUSS_COOLDOWN`, `_DISCUSS_APPROVED`, `_PENDING_ASK_REQUESTS` retain entries for terminated sessions
+### 10. Session registry cleanup miss (PTY/outline/ask)
+- **Sig**: `_SESSION_STDIN`, `_REQUEST_TO_SESSION`, `_OUTLINE_PENDING`, `_DISCUSS_APPROVED`, `_PLAN_EXIT_APPROVED`, `_PENDING_ASK_REQUESTS`, `_ASK_QUESTION_FLOWS` retain entries for terminated sessions (`_DISCUSS_COOLDOWN` was retired in #570)
 - **Class**: session-resume-lock
 - **Canonical**: `control-channel.md` §Session registries — clean up in `finally` of `run_impl`
 - **Posture**: regression-watch.
@@ -100,11 +100,11 @@ For each pattern:
 - **Canonical**: #294 — master pause toggle; in-memory only, restart auto-resumes
 - **Posture**: regression-watch.
 
-### 16. Plan-mode cooldown bypass abuse
-- **Sig**: `ExitPlanMode` rapid-fire retries within cooldown window; `_DISCUSS_COOLDOWN` escalation should auto-deny after first retry
+### 16. ExitPlanMode re-issued immediately after a denial
+- **Sig**: `ExitPlanMode` rapid-fire retries after a Telegram deny, with no intervening assistant text turn
 - **Class**: control-channel
-- **Canonical**: `control-channel.md` §Progressive cooldown — `min(30 * deny_count, 120)` seconds
-- **Posture**: regression-watch.
+- **Canonical**: `control-channel.md` §Outline gate. The gate is now purely **text-based** — a re-issue is auto-denied until ≥200 chars of visible outline exist (`_OUTLINE_PENDING`). The 30/60/90/120s progressive cooldown (`_DISCUSS_COOLDOWN`) that used to back this was **retired in #570**, after the upstream loop was verified fixed on CLI 2.1.215 (2026-07-20).
+- **Posture**: regression-watch — on the *upstream* loop, not on the retired cooldown. Repro: deny an ExitPlanMode control_request via the Telegram buttons and watch for an immediate re-issue. If it returns, reopen #570's lineage (#126) rather than reinstating a timer.
 
 ### 17. `_clear_background_handle` racing watchdog read (#374, #333, #507 redux)
 - **Sig**: background-handle scalar wiped before watchdog reads it; "dead wakeup" symptom

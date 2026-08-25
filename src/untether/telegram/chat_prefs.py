@@ -6,8 +6,13 @@ import msgspec
 
 from ..context import RunContext
 from ..logging import get_logger
+from ..runners.run_options import CLAUDE_PLAN_AUTO_MODE
 from ..transport import ChannelId
-from .engine_overrides import EngineOverrides, normalize_overrides
+from .engine_overrides import (
+    EngineOverrides,
+    migrate_legacy_overrides,
+    normalize_overrides,
+)
 from .state_store import JsonStateStore
 
 logger = get_logger(__name__)
@@ -29,6 +34,12 @@ class _ChatPrefs(msgspec.Struct, forbid_unknown_fields=False):
 class _ChatPrefsState(msgspec.Struct, forbid_unknown_fields=False):
     version: int
     chats: dict[str, _ChatPrefs] = msgspec.field(default_factory=dict)
+    # #741 one-shot marker: has the legacy Claude `auto` → `plan-auto` rewrite
+    # run against this file?  Deliberately a field rather than a STATE_VERSION
+    # bump — `JsonStateStore` *discards* state on a version mismatch, so
+    # bumping would wipe every chat's prefs to migrate one value.  Absent in
+    # pre-0.35.5rc8 files, which decode to False and get migrated.
+    permission_mode_migrated: bool = False
 
 
 def resolve_prefs_path(config_path: Path) -> Path:
@@ -82,6 +93,40 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
             log_prefix="telegram.chat_prefs",
             logger=logger,
         )
+
+    def _reload_locked_if_needed(self) -> None:
+        super()._reload_locked_if_needed()
+        self._migrate_permission_modes_locked()
+
+    def _migrate_permission_modes_locked(self) -> None:
+        """One-shot rewrite of the legacy Claude ``auto`` spelling (#741).
+
+        Runs against each state file exactly once, guarded by the persisted
+        ``permission_mode_migrated`` flag.  It has to be one-shot rather than
+        applied on every read: after the rename, ``auto`` is a value a user can
+        legitimately *choose* from ``/planmode`` or ``/config`` to mean Claude
+        Code's own auto mode, so a read-time rewrite would make the new mode
+        permanently unreachable through the UI.
+        """
+        if self._state.permission_mode_migrated:
+            return
+        migrated_chats = 0
+        for chat in self._state.chats.values():
+            for engine_key, override in list(chat.engine_overrides.items()):
+                updated = migrate_legacy_overrides(engine_key, override)
+                if updated is not override:
+                    chat.engine_overrides[engine_key] = updated
+                    migrated_chats += 1
+        self._state.permission_mode_migrated = True
+        self._save_locked()
+        if migrated_chats:
+            logger.info(
+                "chat_prefs.permission_mode.migrated",
+                path=str(self._path),
+                overrides=migrated_chats,
+                legacy="auto",
+                renamed_to=CLAUDE_PLAN_AUTO_MODE,
+            )
 
     async def get_default_engine(self, chat_id: ChannelId) -> str | None:
         async with self._lock:

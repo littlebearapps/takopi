@@ -36,20 +36,25 @@ Already have a bot token? Skip the BotFather step with `untether --bot-token YOU
 
 ## Which AI coding agents does Untether support?
 
-Untether supports six agent CLIs out of the box:
+Untether supports four agent CLIs out of the box:
 
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — complex refactors, architecture, long context. Most interactive features (plan mode, ask mode, diff preview, the Pause & Outline plan gate) are Claude-specific.
 - **[Codex](https://github.com/openai/codex)** — fast edits, shell commands, OpenAI subscription via ChatGPT login.
 - **[OpenCode](https://github.com/opencode-ai/opencode)** — 75+ providers via Models.dev, local model support.
 - **[Pi](https://github.com/mariozechner/pi-coding-agent)** — multi-provider auth, conversational style.
-- **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** — Google Gemini models with configurable approval modes.
-- **[Amp](https://ampcode.com)** — Sourcegraph's coding agent with mode selection.
+
+Two further engines still load but are **deprecated** and targeted for removal in 0.36.0 — don't start new work on them:
+
+- **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** — Google ended Gemini CLI support for individual and free accounts on 18 June 2026 and directs users to [Antigravity CLI](https://antigravity.google). Enterprise / Google Cloud licences may still work, but Untether no longer verifies this. Antigravity is planned as a separate engine.
+- **[Amp](https://ampcode.com)** — Untether's Amp integration is no longer maintained. Amp remotely refuses clients it considers out of date, and Untether does not track that cadence, so a working setup can stop working without notice. This is a decision about our integration, not about Amp itself.
 
 You can switch between engines per-message by prefixing with `/<engine>` (e.g. `/claude`, `/codex`). Each chat or topic can also have its own default engine. The full per-engine feature matrix is in the [README](https://github.com/littlebearapps/untether#-supported-engines).
 
 ## Do I need an API key to use Untether?
 
-In most cases, no. Untether uses whatever authentication your agent CLI already has — your existing Claude Pro/Max subscription via OAuth, your ChatGPT Plus/Pro/Business plan via the Codex device-auth flow, your Gemini account, your Amp Sourcegraph login. If `claude auth status` works on your machine, Untether will use the same authentication.
+In most cases, no. Untether uses whatever authentication your agent CLI already has — your existing Claude Pro/Max subscription via OAuth, your ChatGPT Plus/Pro/Business plan via the Codex device-auth flow, or your OpenCode/Pi provider login. If `claude auth status` works on your machine, Untether will use the same authentication.
+
+The two [deprecated engines](#which-ai-coding-agents-does-untether-support) are the exception: Gemini CLI no longer authenticates individual or free Google accounts at all (upstream EOL, 18 June 2026), and Amp requires a current client that Untether does not track. Both fail with an authentication or version error rather than falling back to anything — Untether never silently reroutes a run to a different provider.
 
 API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) are only needed if you specifically want API billing instead of a subscription, or for engines that don't offer subscription auth (e.g. some OpenCode providers). Untether itself doesn't make any API calls — it just spawns the agent CLI as a subprocess.
 
@@ -72,11 +77,14 @@ When Claude Code wants to run a tool that needs approval — write a file, run a
 
 If you click "Pause & Outline Plan", Claude writes a plain-language summary of what it's about to do, and you get a second round of buttons: ✅ Approve Plan / ❌ Deny / 💬 Let's discuss. Approving here also auto-approves the next plan-exit so you don't get prompted twice for the same plan.
 
-Per-chat plan mode (`/planmode on/auto/off`) controls when the buttons appear:
+Per-chat permission mode (`/planmode on/plan-auto/auto/off`, or `/config → Permission mode`) controls when the buttons appear:
 
 - **on** — every plan transition prompts for approval.
-- **auto** — plan transitions auto-approve, but tool approvals still appear.
+- **plan-auto** — plan transitions auto-approve, but tool approvals still appear.
+- **auto** — Claude Code's own auto mode: a classifier approves routine work and blocks risky actions such as sending sensitive data to external endpoints. Questions the agent asks you still come through as buttons.
 - **off** — no plan phase; tools auto-execute (subject to engine policy).
+
+The **plan-auto** mode was called `auto` before v0.35.5. It was renamed because Claude Code introduced its own `auto` mode, and the two names collided. If you set `permission_mode = "auto"` in `untether.toml` and want the old behaviour, change it to `"plan-auto"` — Untether logs a warning at startup if it spots the ambiguous value. Per-chat settings you made through the buttons are migrated for you.
 
 For non-Claude engines, approval is enforced per-engine pre-run (Codex `--ask-for-approval`, Gemini `--approval-mode`) rather than via mid-run buttons. Full guide: [Interactive approval](https://untether.littlebearapps.com/how-to/interactive-approval/).
 
@@ -100,7 +108,10 @@ max_cost_per_run = 2.00      # USD; warn or auto-cancel if a single run exceeds 
 max_cost_per_day = 10.00     # USD; ditto across a calendar day
 warn_at_pct = 80             # warn when this % of budget is consumed
 auto_cancel_on_exceed = true # cancel the run when the threshold is hit
+warn_run_above_usd = 20.00   # USD; alert on any single expensive run — works even without a budget
 ```
+
+If you set no budget at all, Untether still flags a single run that costs more than `warn_run_above_usd` (default US$20) with a chat line and a `cost.run_outlier` log entry, so a costly session can't pass silently. Set `notify_run_outlier = false` to keep the log entry without the chat line.
 
 `/usage` shows the current run's cost; `/usage debug` shows OAuth token expiry, schema-mismatch counters, and cache freshness — useful when the subscription footer goes silent. `/stats` reports per-engine totals across today, this week, and all time.
 
@@ -125,9 +136,10 @@ voice_transcription_model = "whisper-large-v3-turbo"
 voice_transcription_base_url = "https://api.groq.com/openai/v1"
 voice_transcription_api_key = "gsk_..."   # SecretStr — masked in logs
 voice_transcription_language = "en"       # optional ISO-639-1 hint
+voice_transcription_prompt = "Trello, Untether, Claude Code"  # optional vocabulary bias
 ```
 
-Groq's Whisper Large v3 Turbo is fast and cheap; any OpenAI-compatible Whisper endpoint works (including a self-hosted one). If you only ever speak one language, set `voice_transcription_language` (e.g. `"en"`) — without the hint, Whisper-family models occasionally guess the wrong language on very short voice notes. The API key is `SecretStr`-masked in `repr()` / `str()` / structlog so it never lands in journal or crash output. For safety, `voice_transcription_base_url` is SSRF-checked — a URL that resolves to a private/reserved address (e.g. a self-hosted Whisper on `10.x` or `192.168.x`) is rejected unless you explicitly allow its range with `voice_transcription_url_allowlist = ["10.0.0.0/8"]`. Full setup: [Voice notes](https://untether.littlebearapps.com/how-to/voice-notes/).
+Groq's Whisper Large v3 Turbo is fast and cheap; any OpenAI-compatible Whisper endpoint works (including a self-hosted one). If you only ever speak one language, set `voice_transcription_language` (e.g. `"en"`) — without the hint, Whisper-family models occasionally guess the wrong language on very short voice notes. Untether already biases the decoder toward the terms every user speaks — the engine names (Claude Code, Codex, OpenCode, Gemini, Amp, Pi) plus Untether's own vocabulary. If transcription keeps mangling *your* project or tool names ("trollo" instead of Trello), set `voice_transcription_prompt` to a short comma-separated list of those names; your value replaces the built-in list, so include the engine names you care about too. Keep it to genuinely high-frequency nouns (≤1000 characters, and effect varies by model): an overstuffed prompt can make the model hallucinate those terms on short or silent clips. Set it to `""` to switch the bias off entirely. The API key is `SecretStr`-masked in `repr()` / `str()` / structlog so it never lands in journal or crash output. For safety, `voice_transcription_base_url` is SSRF-checked — a URL that resolves to a private/reserved address (e.g. a self-hosted Whisper on `10.x` or `192.168.x`) is rejected unless you explicitly allow its range with `voice_transcription_url_allowlist = ["10.0.0.0/8"]`. Full setup: [Voice notes](https://untether.littlebearapps.com/how-to/voice-notes/).
 
 ## Can agents send files back to me automatically?
 

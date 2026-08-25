@@ -301,6 +301,8 @@ def test_voice_transcription_language_default_none(tmp_path: Path) -> None:
 
 
 def test_voice_transcription_prompt_normalised(tmp_path: Path) -> None:
+def test_voice_transcription_prompt_stripped(tmp_path: Path) -> None:
+    """#691: vocabulary-bias prompt is stripped at parse time."""
     config_path = tmp_path / "untether.toml"
     config_path.write_text(
         "[transports.telegram]\n"
@@ -315,6 +317,20 @@ def test_voice_transcription_prompt_normalised(tmp_path: Path) -> None:
 
 
 def test_voice_transcription_prompt_default_none(tmp_path: Path) -> None:
+        'voice_transcription_prompt = " Trello, Untether, Claude Code "\n',
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert (
+        settings.transports.telegram.voice_transcription_prompt
+        == "Trello, Untether, Claude Code"
+    )
+
+
+def test_voice_transcription_prompt_default_none(tmp_path: Path) -> None:
+    """#691/#703: omitted → None at the settings layer. None now MEANS
+    "use the shipped default" — the resolution lives at the transport
+    boundary (voice.resolve_transcription_prompt), not here."""
     config_path = tmp_path / "untether.toml"
     config_path.write_text(
         '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n'
@@ -323,6 +339,39 @@ def test_voice_transcription_prompt_default_none(tmp_path: Path) -> None:
     )
     settings, _ = load_settings(config_path)
     assert settings.transports.telegram.voice_transcription_prompt is None
+
+
+def test_voice_transcription_prompt_empty_preserved_as_optout(tmp_path: Path) -> None:
+    """#703: an explicitly-empty value must survive validation as "" so it
+    stays distinguishable from unset — collapsing it to None would make the
+    opt-out silently re-enable the shipped default."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "tok"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n"
+        'voice_transcription_prompt = "   "\n',
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert settings.transports.telegram.voice_transcription_prompt == ""
+
+
+def test_voice_transcription_prompt_rejects_over_1000_chars(tmp_path: Path) -> None:
+    """#691: reject rather than silently truncate — invisible truncation
+    would change the configured bias without telling the operator."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "tok"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n"
+        f'voice_transcription_prompt = "{"x" * 1001}"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="voice_transcription_prompt"):
+        load_settings(config_path)
 
 
 def test_voice_transcription_language_rejects_non_iso_code(tmp_path: Path) -> None:

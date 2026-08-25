@@ -36,6 +36,30 @@ Non-interactive requests are auto-approved without showing buttons:
 - `ExitPlanMode`: NEVER auto-approved — always show Telegram buttons
 - `AskUserQuestion`: NEVER auto-approved — shown in Telegram for user to reply with text
 
+## Permission modes (#741)
+
+Untether values map onto `--permission-mode` via
+`runners/run_options.claude_cli_permission_mode()`. Only **`plan-auto`** is
+translated (→ CLI `plan`); every genuine CLI mode — `default`, `manual`,
+`plan`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions` — passes through
+verbatim.
+
+- `plan-auto` is Untether's sugar: CLI plan mode **plus** the `ExitPlanMode`
+  rubber stamp (`state.auto_approve_exit_plan_mode`, armed by
+  `is_claude_plan_auto()`). It was spelled `auto` until 0.35.5rc8, shadowing
+  the CLI's own mode.
+- `auto` is Claude Code's classifier-gated mode. It must **never** arm
+  `auto_approve_exit_plan_mode` — that would re-create the blanket downstream
+  bypass tracked by #383 on a mode that has no plan gate.
+- The control channel survives `auto`: `AskUserQuestion` still raises a
+  `can_use_tool` control_request (probed on CLI 2.1.228), and classifier
+  fallback after repeated blocks routes through `--permission-prompt-tool
+  stdio` as a normal Telegram approval.
+- Never re-introduce an inline `"plan" if mode == "auto"` remap. Add new modes
+  to `CLAUDE_CLI_PERMISSION_MODES`; the drift test in
+  `tests/test_claude_permission_modes.py` re-derives that set from the
+  installed CLI and fails when it rots.
+
 ## AskUserQuestion flow
 
 When Claude calls `AskUserQuestion`:

@@ -169,6 +169,18 @@ class TelegramTransportSettings(BaseModel):
     # #691: optional vocabulary/context hint forwarded to OpenAI-compatible
     # transcription providers. Useful for project names and technical terms.
     voice_transcription_prompt: NonEmptyStr | None = None
+    # #691: optional vocabulary-bias prompt forwarded to the STT API — steers
+    # the decoder toward domain proper nouns ('trollo' → Trello). Effect is
+    # model-dependent; keep it to genuinely high-frequency nouns — an
+    # overstuffed prompt can induce hallucinated terms on short clips.
+    #
+    # #703: unset now resolves to DEFAULT_VOICE_TRANSCRIPTION_PROMPT (the
+    # product-generic engine/tool vocabulary) rather than omitting the
+    # parameter — #691 shipped inert on every fleet host because no TOML set
+    # it. Explicit `""` disables, matching how `[preamble] text = ""` works;
+    # that's why this is `str | None` and not `NonEmptyStr | None` — the
+    # empty string has to survive validation to mean anything.
+    voice_transcription_prompt: str | None = None
     voice_show_transcription: bool = True
     # #381: optional SSRF allowlist (CIDR / bare-IP strings) for
     # voice_transcription_base_url — lets operators opt in to private endpoints
@@ -227,6 +239,32 @@ class TelegramTransportSettings(BaseModel):
                 "be sent in an HTTP Authorization header"
             ) from exc
         return SecretStr(key)
+
+    @field_validator("voice_transcription_prompt", mode="after")
+    @classmethod
+    def _validate_voice_prompt(cls, v: str | None) -> str | None:
+        """#691: strip; reject rather than silently truncate past 1000 chars —
+        provider prompt windows are token-capped (~224 for Whisper) and
+        invisible truncation would change the configured bias without telling
+        the operator.
+
+        #703: an explicitly-configured empty string is PRESERVED as ``""``
+        (the opt-out sentinel) instead of collapsing to ``None``. ``None`` now
+        means "unset → use the shipped default", so the two must stay
+        distinguishable. Resolution happens in
+        :func:`untether.telegram.voice.resolve_transcription_prompt`.
+        """
+        if v is None:
+            return None
+        prompt = v.strip()
+        if not prompt:
+            return ""
+        if len(prompt) > 1000:
+            raise ValueError(
+                "voice_transcription_prompt must be ≤1000 characters "
+                f"(got {len(prompt)}); keep it to high-frequency domain nouns"
+            )
+        return prompt
 
     @field_validator("voice_transcription_language", mode="after")
     @classmethod
@@ -330,6 +368,16 @@ class CostBudgetSettings(BaseModel):
     max_cost_per_day: float | None = Field(default=None, ge=0)
     warn_at_pct: int = Field(default=70, ge=0, le=100)
     auto_cancel: bool = False
+    # #702: a per-run spend signal that does NOT require the rest of this
+    # block. Everything above is gated on `enabled`, so the one configuration
+    # where a spend alarm matters most — no budget at all — is the one where
+    # it was disabled by construction. Unset falls back to
+    # DEFAULT_RUN_OUTLIER_USD; 0 disables the signal entirely.
+    warn_run_above_usd: float | None = Field(default=None, ge=0)
+    # Opt-out for the one-line chat notice. The log event fires regardless —
+    # the notice is the half that reaches an operator who isn't reading
+    # journalctl, which is exactly the `show_api_cost = false` fleet default.
+    notify_run_outlier: bool = True
 
 
 class LoopSettings(BaseModel):

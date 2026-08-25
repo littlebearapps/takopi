@@ -79,10 +79,10 @@ npm install -g opencode-ai@latest
 # Pi
 npm install -g @mariozechner/pi-coding-agent
 
-# Gemini CLI
+# Gemini CLI — DEPRECATED, see below
 npm install -g @google/gemini-cli
 
-# Amp
+# Amp — DEPRECATED, see below
 npm install -g @sourcegraph/amp
 ```
 
@@ -98,8 +98,64 @@ Run `untether doctor` to see which engines are detected.
 - **Claude Code:** Run `claude login` to authenticate. On macOS, credentials are stored in Keychain; on Linux, in `~/.claude/.credentials.json`
 - **OpenCode:** Run `opencode` and authenticate with your chosen provider
 - **Pi:** Run `pi` and log in with your provider
-- **Gemini CLI:** Run `gemini` and authenticate with your Google account
-- **Amp:** Run `amp` and sign in with your Sourcegraph account
+- **Gemini CLI** (⚠️ deprecated): see below — individual and free Google accounts can no longer authenticate at all
+- **Amp** (⚠️ deprecated): see below — `amp login` still works, but the client version is refused remotely
+
+## Why does my Gemini run stall, or my Amp run fail immediately?
+
+Both engines are **deprecated** and currently non-functional on ordinary accounts.
+They fail in two different ways.
+
+Confirm by running the CLI directly — both exit non-zero:
+
+```bash
+gemini --output-format stream-json --prompt="say OK"   # exits 1
+amp -x "say OK"                                        # exits 1
+```
+
+### Amp — fails fast with a version refusal
+
+**Symptom:** the run ends in a few seconds as `error · amp`, with a `426` in the
+message.
+
+```
+426 {"error":{"message":"This version of Amp is no longer supported.
+     Run `amp update` to continue. ..."}}
+```
+
+Amp remotely refuses clients it considers out of date. `amp update` may restore
+it, but Amp re-refuses on its own schedule, so this recurs. Untether does not
+track that cadence.
+
+Note `amp threads list` (and therefore `/threads`) is a **local** command that
+does not hit the version gate — `/threads` can list threads normally while
+`amp -x` is refused.
+
+### Gemini — stalls instead of failing
+
+**Symptom:** the progress message sits at `starting · gemini` and never advances.
+Eventually the stall watchdog fires and you get
+`Auto-cancelled: session appears stuck (max_warnings)` — typically after ~10
+minutes.
+
+Run standalone, `gemini` prints `IneligibleTierError: This client is no longer
+supported for Gemini Code Assist for individuals` and exits 1. Spawned by
+Untether, the subprocess instead **hangs** without exiting, so Untether sees no
+events and no exit — hence the stall rather than an error message. Tracked as
+[#724](https://github.com/littlebearapps/untether/issues/724) and **not being
+fixed**, because the engine is deprecated.
+
+Gemini CLI reached **end-of-life for individual and free Google accounts on
+18 June 2026**. There is no fix — migrate to
+[Antigravity CLI](https://antigravity.google) (Untether support is planned as a
+separate engine) or use a supported engine. Enterprise / Google Cloud licences
+may still work, but Untether no longer verifies this.
+
+### What to do
+
+Both engines are targeted for removal in 0.36.0 — see
+[deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines).
+Switch to `claude`, `codex`, `opencode`, or `pi` via `/config → Engine & model`.
 
 ## Progress stuck on "starting"
 

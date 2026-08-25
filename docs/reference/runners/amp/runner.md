@@ -1,3 +1,22 @@
+> ## ⚠️ Status: deprecated
+>
+> The `amp` engine is **deprecated** and targeted for **removal in 0.36.0**.
+>
+> This is a decision about **Untether's integration**, not about AMP itself.
+> AMP remotely refuses clients it considers out of date — a two-month-old build
+> returns `426 This version of Amp is no longer supported. Run `amp update`` and
+> exits **1**, so the run surfaces as an error within seconds. Untether does not
+> track that update cadence, so a working setup can stop working without notice.
+> Note `amp threads list` is local and does not hit the version gate, so
+> `/threads` can keep working while `amp -x` is refused.
+>
+> Combined with no observed Untether usage, the integration is frozen: security
+> fixes only, no feature work, no parity catch-up, and cross-engine sweeps skip
+> it (see [`runner-development.md`](../../../../.claude/rules/runner-development.md)).
+>
+> The AMP-only `/threads` command is deprecated alongside this runner and will be
+> removed with it.
+
 Below is the implementation spec for the **AMP CLI (Sourcegraph)** runner shipped in Untether.
 
 ---

@@ -9,7 +9,7 @@ import structlog.testing
 
 from tests.factories import action_completed, action_started
 from untether.markdown import MarkdownParts, MarkdownPresenter
-from untether.model import CompletedEvent, ResumeToken, UntetherEvent
+from untether.model import CompletedEvent, ResumeToken, StartedEvent, UntetherEvent
 from untether.progress import ProgressTracker
 from untether.runner_bridge import (
     _EPHEMERAL_MSGS,
@@ -5116,6 +5116,7 @@ class TestShouldAutoContinue:
         auto_continued_count: int = 0,
         max_retries: int = 1,
         proc_returncode: int | None = 0,
+        saw_result: bool = False,
     ) -> bool:
         from untether.runner_bridge import _should_auto_continue
 
@@ -5127,6 +5128,7 @@ class TestShouldAutoContinue:
             auto_continued_count=auto_continued_count,
             max_retries=max_retries,
             proc_returncode=proc_returncode,
+            saw_result=saw_result,
         )
 
     def test_detects_bug_scenario(self):
@@ -5199,6 +5201,45 @@ class TestShouldAutoContinue:
         gets pointlessly re-spawned.
         """
         assert self._call(proc_returncode=1) is False
+
+    # ── #716: the trailing-frame case ──
+
+    def test_skips_when_result_was_seen(self):
+        """#716: a healthy run reporting `last_event_type=user`.
+
+        The shape the issue was filed on, and not a rare one: 106 healthy
+        (`ok=True`, uncancelled) Claude runs on nsd logged
+        `session.summary last_event_type=user`. Every other gate passes on
+        those, so before #716 the predicate returned True on finished runs
+        and only `final_delivery["sent"]` at the call site stopped a
+        spurious salvage re-spawn.
+        """
+        assert self._call(last_event_type="user", saw_result=True) is False
+
+    def test_still_fires_when_no_result_frame_arrived(self):
+        """The mitigation itself must survive the new gate.
+
+        Neither upstream defect emits a `result` — claude-code#34142 skips
+        the assistant continuation after a tool_result, #30333 never emits
+        ResultMessage with background subagents. So `saw_result=False` +
+        `last_event_type="user"` is precisely the cohort auto-continue
+        exists to salvage, and it must still be detected.
+        """
+        assert self._call(last_event_type="user", saw_result=False) is True
+
+    def test_result_latch_beats_every_other_eligible_gate(self):
+        """`saw_result` is sufficient on its own — no gate combination
+        can re-enable a salvage on a run that reached its result."""
+        assert (
+            self._call(
+                last_event_type="user",
+                saw_result=True,
+                proc_returncode=0,
+                auto_continued_count=0,
+                max_retries=5,
+            )
+            is False
+        )
 
 
 class TestIsSignalDeath:
@@ -8721,3 +8762,98 @@ def test_572_retry_notice_format() -> None:
     assert "attempt" not in first
     second = _format_stream_idle_retry_notice(1)
     assert "(attempt 2)" in second
+
+
+# ---------------------------------------------------------------------------
+# #695 — resolved model is logged on runner.completed / session.summary
+# ---------------------------------------------------------------------------
+
+
+def test_model_log_fields_emits_raw_id_and_display_string() -> None:
+    """#695: log BOTH the raw ID and the shortened display string.
+
+    The pair is the point: it makes a shortener regression self-evident
+    from logs alone. #688's worst arm was ``claude-opus-5[1m]`` rendering
+    as a bare ``opus`` — silent loss of the 1M-context marker, a 1M run
+    indistinguishable from a standard one — and nothing in the logs could
+    have caught it because the model was never logged at all.
+    """
+    from untether.runner_bridge import _model_log_fields
+
+    fields = _model_log_fields({"model": "claude-opus-5[1m]"})
+    assert fields == {"model": "claude-opus-5[1m]", "model_display": "opus 5 (1M)"}
+
+
+def test_model_log_fields_display_is_not_re_derived() -> None:
+    """#695: ``model_display`` must come from ``_short_model_name`` itself,
+    so the logged string is literally what the footer renders rather than a
+    parallel derivation that could drift."""
+    from untether.markdown import _short_model_name
+    from untether.runner_bridge import _model_log_fields
+
+    for raw in (
+        "claude-fable-5",
+        "claude-opus-5[1m]",
+        "claude-sonnet-4-5-20250929",
+        "gpt-5.6-sol",
+        "gemini-2.5-pro",
+    ):
+        assert _model_log_fields({"model": raw})["model_display"] == _short_model_name(
+            raw
+        )
+
+
+def test_model_log_fields_absent_when_model_unknown() -> None:
+    """#695: omit the keys rather than log ``model=None``.
+
+    Some engines ship the model late — pi sends it from ``message_end`` via
+    a supplementary ``StartedEvent`` — so the field must be optional. An
+    absent key reads as "not reported"; ``None`` reads as "reported as
+    nothing".
+    """
+    from untether.runner_bridge import _model_log_fields
+
+    assert _model_log_fields(None) == {}
+    assert _model_log_fields({}) == {}
+    assert _model_log_fields({"permissionMode": "plan"}) == {}
+    assert _model_log_fields({"model": ""}) == {}
+    assert _model_log_fields({"model": 5}) == {}
+
+
+def test_session_summary_logs_model_from_tracker_meta() -> None:
+    """#695: ``session.summary`` reads the model off the tracker's merged
+    meta, which is where ``StartedEvent.meta`` lands."""
+    from untether.runner_bridge import _model_log_fields
+
+    tracker = ProgressTracker(engine="claude")
+    tracker.note_event(
+        StartedEvent(
+            engine="claude",
+            resume=ResumeToken(engine="claude", value="s1"),
+            meta={"model": "claude-opus-5[1m]", "permissionMode": "plan"},
+        )
+    )
+    fields = _model_log_fields(tracker.meta)
+    assert fields["model"] == "claude-opus-5[1m]"
+    assert fields["model_display"] == "opus 5 (1M)"
+
+
+def test_model_log_fields_survives_late_meta_merge() -> None:
+    """#695: a supplementary ``StartedEvent`` carrying only the model (the
+    pi shape) still yields the fields after ``note_event`` merges meta."""
+    from untether.runner_bridge import _model_log_fields
+
+    tracker = ProgressTracker(engine="pi")
+    resume = ResumeToken(engine="pi", value="s2")
+    tracker.note_event(
+        StartedEvent(engine="pi", resume=resume, meta={"permissionMode": "plan"})
+    )
+    assert _model_log_fields(tracker.meta) == {}
+    # Late arrival from message_end.
+    tracker.note_event(
+        StartedEvent(engine="pi", resume=resume, meta={"model": "claude-fable-5"})
+    )
+    assert _model_log_fields(tracker.meta) == {
+        "model": "claude-fable-5",
+        "model_display": "fable 5",
+    }

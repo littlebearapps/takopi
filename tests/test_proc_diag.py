@@ -265,9 +265,11 @@ def test_find_descendants_nonexistent() -> None:
     assert descendants == []
 
 
-@pytest.mark.skipif(sys.platform == "linux", reason="tests non-Linux path")
-def test_collect_returns_none_on_non_linux() -> None:
-    """On non-Linux platforms, collect_proc_diag returns None."""
+@pytest.mark.skipif(
+    sys.platform in ("linux", "darwin"), reason="tests unsupported-platform path"
+)
+def test_collect_returns_none_on_unsupported_platform() -> None:
+    """On platforms without a backend, collect_proc_diag returns None (#689)."""
     diag = collect_proc_diag(os.getpid())
     assert diag is None
 
@@ -410,3 +412,194 @@ def test_pid_starttime_missing_pid_returns_none() -> None:
 
     # PID 0 is reserved and never has a /proc/0/stat.
     assert pid_starttime(0) is None
+
+
+# ---------------------------------------------------------------------------
+# #689: macOS (darwin) backend — ps-based, fully mocked so it runs on Linux CI
+# ---------------------------------------------------------------------------
+
+
+class TestParsePsTime:
+    def test_minutes_seconds_centis(self) -> None:
+        from untether.utils.proc_diag import _parse_ps_time
+
+        assert _parse_ps_time("0:00.01") == 1
+        assert _parse_ps_time("0:07.5") == 750
+        assert _parse_ps_time("12:34.56") == 75456
+
+    def test_hours_format_no_unit_discontinuity(self) -> None:
+        from untether.utils.proc_diag import _parse_ps_time
+
+        assert _parse_ps_time("1:02:03") == 372300
+        assert _parse_ps_time("123:45:56") == 44555600
+
+    def test_day_prefix(self) -> None:
+        from untether.utils.proc_diag import _parse_ps_time
+
+        assert _parse_ps_time("1-02:03:04") == 9378400
+
+    def test_malformed_returns_none(self) -> None:
+        from untether.utils.proc_diag import _parse_ps_time
+
+        for bad in ("", "abc", "1:2:3:4", "-5:00", "1:xx.3", "5", "1:-2", "x-1:02:03"):
+            assert _parse_ps_time(bad) is None, bad
+
+
+_PS_OUTPUT = """\
+    1     0 Ss    1:00.00  1024
+  100     1 S     0:10.00  2048
+  200   100 R+    0:05.50  4096
+  300   200 U     0:02.00   512
+  400   300 S     0:01.00   256
+  999     1 Z     0:00.00     0
+garbage line without numbers
+  500   100 S     bogus     128
+"""
+
+
+def _fake_ps_run(*args, **kwargs):
+    class _Out:
+        returncode = 0
+        stdout = _PS_OUTPUT
+        stderr = ""
+
+    return _Out()
+
+
+class TestDarwinProcessTable:
+    def test_parses_valid_rows_and_skips_malformed(self, monkeypatch) -> None:
+        from untether.utils import proc_diag
+
+        monkeypatch.setattr(proc_diag.subprocess, "run", _fake_ps_run)
+        table = proc_diag._read_darwin_process_table()
+        assert table is not None
+        assert table[200] == (100, "R", 550, 4096)
+        assert table[300] == (200, "U", 200, 512)
+        # Malformed TIME parses to None but the row survives.
+        assert table[500] == (100, "S", None, 128)
+        assert "garbage" not in str(table)
+
+    def test_ps_failure_returns_none(self, monkeypatch) -> None:
+        from untether.utils import proc_diag
+
+        def _fail(*args, **kwargs):
+            raise OSError("no ps")
+
+        monkeypatch.setattr(proc_diag.subprocess, "run", _fail)
+        assert proc_diag._read_darwin_process_table() is None
+
+    def test_nonzero_returncode_returns_none(self, monkeypatch) -> None:
+        from untether.utils import proc_diag
+
+        class _Out:
+            returncode = 1
+            stdout = ""
+            stderr = "err"
+
+        monkeypatch.setattr(proc_diag.subprocess, "run", lambda *a, **k: _Out())
+        assert proc_diag._read_darwin_process_table() is None
+
+
+class TestCollectDarwinProcDiag:
+    def test_collects_state_cpu_tree_and_children(self, monkeypatch) -> None:
+        from untether.utils import proc_diag
+
+        monkeypatch.setattr(proc_diag.subprocess, "run", _fake_ps_run)
+        monkeypatch.setattr(proc_diag, "_is_alive", lambda pid: True)
+        diag = proc_diag._collect_darwin_proc_diag(100)
+        assert diag is not None
+        assert diag.alive is True
+        assert diag.state == "S"
+        assert diag.cpu_utime == 1000
+        assert diag.cpu_stime == 0
+        assert diag.rss_kb == 2048
+        # Direct children only in child_pids (200 and the bogus-TIME 500).
+        assert diag.child_pids == [200, 500]
+        # Descendant 500 has unparseable CPU → tree stays unknown, not
+        # undercounted.
+        assert diag.tree_cpu_utime is None
+        assert diag.tree_cpu_stime is None
+
+    def test_tree_cpu_sums_descendants(self, monkeypatch) -> None:
+        from untether.utils import proc_diag
+
+        monkeypatch.setattr(proc_diag.subprocess, "run", _fake_ps_run)
+        monkeypatch.setattr(proc_diag, "_is_alive", lambda pid: True)
+        diag = proc_diag._collect_darwin_proc_diag(200)
+        assert diag is not None
+        # 200 (550) + descendants 300 (200) + 400 (100) = 850.
+        assert diag.tree_cpu_utime == 850
+        assert diag.child_pids == [300]
+
+    def test_dead_pid_short_circuits(self, monkeypatch) -> None:
+        from untether.utils import proc_diag
+
+        monkeypatch.setattr(proc_diag, "_is_alive", lambda pid: False)
+        diag = proc_diag._collect_darwin_proc_diag(100)
+        assert diag == ProcessDiag(pid=100, alive=False)
+
+    def test_alive_but_missing_from_table_returns_none(self, monkeypatch) -> None:
+        from untether.utils import proc_diag
+
+        monkeypatch.setattr(proc_diag.subprocess, "run", _fake_ps_run)
+        monkeypatch.setattr(proc_diag, "_is_alive", lambda pid: True)
+        assert proc_diag._collect_darwin_proc_diag(7777) is None
+
+    def test_table_failure_returns_none(self, monkeypatch) -> None:
+        from untether.utils import proc_diag
+
+        monkeypatch.setattr(proc_diag, "_is_alive", lambda pid: True)
+        monkeypatch.setattr(proc_diag, "_read_darwin_process_table", lambda: None)
+        assert proc_diag._collect_darwin_proc_diag(100) is None
+
+    def test_cpu_activity_detected_across_snapshots(self, monkeypatch) -> None:
+        from untether.utils import proc_diag
+
+        monkeypatch.setattr(proc_diag.subprocess, "run", _fake_ps_run)
+        monkeypatch.setattr(proc_diag, "_is_alive", lambda pid: True)
+        prev = proc_diag._collect_darwin_proc_diag(200)
+        busier = _PS_OUTPUT.replace("0:05.50", "0:05.60")
+
+        def _fake_busier(*args, **kwargs):
+            class _Out:
+                returncode = 0
+                stdout = busier
+                stderr = ""
+
+            return _Out()
+
+        monkeypatch.setattr(proc_diag.subprocess, "run", _fake_busier)
+        curr = proc_diag._collect_darwin_proc_diag(200)
+        assert is_cpu_active(prev, curr) is True
+        assert is_tree_cpu_active(prev, curr) is True
+
+
+def test_collect_dispatches_to_darwin_backend(monkeypatch) -> None:
+    from untether.utils import proc_diag
+
+    sentinel = ProcessDiag(pid=1, alive=True, state="R")
+    monkeypatch.setattr(proc_diag.sys, "platform", "darwin")
+    monkeypatch.setattr(proc_diag, "_collect_darwin_proc_diag", lambda pid: sentinel)
+    assert proc_diag.collect_proc_diag(1) is sentinel
+
+
+def test_is_alive_permission_error_means_alive(monkeypatch) -> None:
+    from untether.utils import proc_diag
+
+    def _eperm(pid: int, sig: int) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr(proc_diag.os, "kill", _eperm)
+    assert proc_diag._is_alive(12345) is True
+
+
+def test_read_cmdline_argv_roundtrip() -> None:
+    from untether.utils.proc_diag import read_cmdline_argv
+
+    if sys.platform != "linux":
+        pytest.skip("Linux-only /proc")
+    argv = read_cmdline_argv(os.getpid())
+    assert argv is not None
+    assert len(argv) >= 1
+    # PID 0 has no /proc entry.
+    assert read_cmdline_argv(0) is None

@@ -6406,3 +6406,629 @@ def test_654_session_linger_info_reads_registries() -> None:
     finally:
         _SESSION_STDIN.pop(sid, None)
         _SESSION_BG_STATE.pop(sid, None)
+
+
+# ---------------------------------------------------------------------------
+# #692: subscription-cap reset harvested from result-error text
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def clean_reset_latch(monkeypatch):
+    """Isolate the module-level reset latch and pin the latch key."""
+    from untether.runners import claude as claude_mod
+
+    monkeypatch.setattr(claude_mod, "_RATE_LIMIT_RESET_LATCH", {})
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    return claude_mod._RATE_LIMIT_RESET_LATCH
+
+
+def _reset_text_at(dt) -> str:
+    """Build the upstream error string for a UTC wall-clock datetime."""
+    hour12 = dt.hour % 12 or 12
+    ampm = "am" if dt.hour < 12 else "pm"
+    return (
+        f"You've hit your session limit · resets {hour12}:{dt.minute:02d}{ampm} (UTC)"
+    )
+
+
+def test_parse_reset_clause_future_time() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from untether.runners.claude import _parse_rate_limit_reset_clause
+
+    target = datetime.now(UTC) + timedelta(hours=2)
+    parsed = _parse_rate_limit_reset_clause(_reset_text_at(target))
+    assert parsed is not None
+    wait_s, display = parsed
+    # Within a minute of 2h (seconds are floored off the clause).
+    assert 2 * 3600 - 90 < wait_s <= 2 * 3600 + 5
+    assert "(UTC)" in display
+
+
+def test_parse_reset_clause_rolls_to_next_day() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from untether.runners.claude import _parse_rate_limit_reset_clause
+
+    target = datetime.now(UTC) - timedelta(minutes=10)
+    parsed = _parse_rate_limit_reset_clause(_reset_text_at(target))
+    assert parsed is not None
+    wait_s, _ = parsed
+    # ~23h50m away after the next-day roll.
+    assert 23 * 3600 < wait_s <= 24 * 3600
+
+
+def test_parse_reset_clause_just_expired_returns_none() -> None:
+    from datetime import UTC, datetime
+
+    from untether.runners.claude import _parse_rate_limit_reset_clause
+
+    # "resets 5:30pm" parsed at 5:30:NN pm — same minute, just expired;
+    # must NOT roll ~24h forward.
+    now = datetime.now(UTC)
+    assert _parse_rate_limit_reset_clause(_reset_text_at(now)) is None
+
+
+def test_parse_reset_clause_fail_closed_variants() -> None:
+    from untether.runners.claude import _parse_rate_limit_reset_clause
+
+    # No timezone → unresolvable clock → no latch.
+    assert _parse_rate_limit_reset_clause("resets 5:30pm") is None
+    # Unknown timezone.
+    assert _parse_rate_limit_reset_clause("resets 5:30pm (Mars/Olympus)") is None
+    # Invalid hour.
+    assert _parse_rate_limit_reset_clause("resets 13:30pm (UTC)") is None
+    # No clause at all / empty / None.
+    assert _parse_rate_limit_reset_clause("You've hit your session limit") is None
+    assert _parse_rate_limit_reset_clause("") is None
+    assert _parse_rate_limit_reset_clause(None) is None
+
+
+def test_parse_reset_clause_uppercase_and_no_minutes() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from untether.runners.claude import _parse_rate_limit_reset_clause
+
+    target = (datetime.now(UTC) + timedelta(hours=3)).replace(minute=0)
+    hour12 = target.hour % 12 or 12
+    ampm = "AM" if target.hour < 12 else "PM"
+    parsed = _parse_rate_limit_reset_clause(f"Limit hit · resets {hour12}{ampm} (UTC)")
+    assert parsed is not None
+    wait_s, _ = parsed
+    assert 0 < wait_s <= 4 * 3600
+
+
+def test_format_wait_approx_rounds_up() -> None:
+    from untether.runners.claude import _format_wait_approx
+
+    assert _format_wait_approx(30) == "~1 min"
+    assert _format_wait_approx(90) == "~2 min"
+    assert _format_wait_approx(33 * 60) == "~33 min"
+    assert _format_wait_approx(2 * 3600) == "~2h"
+    assert _format_wait_approx(2 * 3600 + 5 * 60) == "~2h 5m"
+
+
+def test_result_error_latches_reset_and_bare_events_use_it(
+    clean_reset_latch,
+) -> None:
+    """#692 end-to-end: an is_error result carrying the reset clause latches
+    the deadline; a subsequent bare rate_limit_event renders the honest
+    wait instead of the ~60s guess, and repeated bare events sharing the
+    latch accumulate only the extension, not the full window each time."""
+    import time as _time
+    from datetime import UTC, datetime, timedelta
+
+    state = ClaudeStreamState()
+    target = datetime.now(UTC) + timedelta(minutes=33)
+    result_event = {
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": True,
+        "num_turns": 10,
+        "duration_ms": 450000,
+        "duration_api_ms": 420000,
+        "session_id": "cap-session-1",
+        "result": _reset_text_at(target),
+    }
+    translate_claude_event(
+        _decode_event(result_event),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    # Latched on the state for post-result stall context…
+    assert state.awaiting_rate_limit_retry() is True
+    assert state.rate_limit_wait_until - _time.monotonic() > 25 * 60
+    # …and process-wide for the NEXT run's bare events.
+    assert clean_reset_latch
+
+    state2 = ClaudeStreamState()
+    events = translate_claude_event(
+        _decode_event({"type": "rate_limit_event"}),
+        title="claude",
+        state=state2,
+        factory=state2.factory,
+    )
+    title = events[0].action.title
+    assert "Rate limited until" in title
+    assert "(UTC)" in title
+    assert "min)" in title
+    # NOT the bare-default copy.
+    assert "waiting to retry (~60s)" not in title
+    first_total = state2.rate_limit_total_s
+    assert first_total > 25 * 60
+
+    # A second bare event against the same latch must not double-count.
+    translate_claude_event(
+        _decode_event({"type": "rate_limit_event"}),
+        title="claude",
+        state=state2,
+        factory=state2.factory,
+    )
+    assert state2.rate_limit_count == 2
+    assert state2.rate_limit_total_s - first_total < 5.0
+
+
+def test_bare_event_without_latch_keeps_default(clean_reset_latch) -> None:
+    """#657 regression guard: no latch → the conservative 60s default."""
+    from untether.runners.claude import DEFAULT_BARE_RATE_LIMIT_WAIT_S
+
+    state = ClaudeStreamState()
+    events = translate_claude_event(
+        _decode_event({"type": "rate_limit_event"}),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "waiting to retry" in events[0].action.title
+    assert state.rate_limit_total_s == DEFAULT_BARE_RATE_LIMIT_WAIT_S
+
+
+def test_expired_latch_pruned(clean_reset_latch) -> None:
+    import time as _time
+
+    from untether.runners import claude as claude_mod
+
+    clean_reset_latch["default"] = (_time.monotonic() - 5.0, "5:30pm (UTC)")
+    assert claude_mod._latched_rate_limit_reset() is None
+    assert clean_reset_latch == {}
+
+
+def test_ok_result_does_not_latch(clean_reset_latch) -> None:
+    """A successful result mentioning 'resets' text must not arm the latch
+    (only error results are harvested)."""
+    state = ClaudeStreamState()
+    result_event = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "num_turns": 2,
+        "duration_ms": 5000,
+        "duration_api_ms": 4000,
+        "session_id": "ok-session",
+        "result": "Done. FYI quota resets 5:30pm (Australia/Melbourne).",
+    }
+    translate_claude_event(
+        _decode_event(result_event),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert clean_reset_latch == {}
+
+
+# ---------------------------------------------------------------------------
+# #701 — action-based caps carry no reset time; show the remedy, not a timer
+# ---------------------------------------------------------------------------
+
+
+_ACTION_CAP_TEXT = (
+    "You've reached your Fable 5 limit. Run /usage-credits to continue "
+    "or switch models with /model."
+)
+
+
+@pytest.fixture
+def clean_action_latch(monkeypatch):
+    """Isolate the module-level action-required latch and pin the latch key."""
+    from untether.runners import claude as claude_mod
+
+    monkeypatch.setattr(claude_mod, "_RATE_LIMIT_ACTION_LATCH", {})
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    return claude_mod._RATE_LIMIT_ACTION_LATCH
+
+
+def test_parse_action_required_cap_shapes() -> None:
+    from untether.runners.claude import _parse_action_required_cap
+
+    # The nsd 2026-07-27 verbatim string.
+    assert _parse_action_required_cap(_ACTION_CAP_TEXT) == "Fable 5"
+    # Remedy present, no model named → "" (still the action class).
+    assert _parse_action_required_cap("Limit reached. Run /usage-credits.") == ""
+    # Remedy present via the /model spelling only.
+    assert (
+        _parse_action_required_cap(
+            "You've reached your Opus 5 limit. Switch models with /model."
+        )
+        == "Opus 5"
+    )
+
+
+def test_parse_action_required_cap_fail_closed() -> None:
+    """A time-based cap must NOT be claimed as action-required — #692 owns it."""
+    from untether.runners.claude import _parse_action_required_cap
+
+    assert (
+        _parse_action_required_cap(
+            "You've hit your session limit · resets 7:50pm (Australia/Melbourne)"
+        )
+        is None
+    )
+    # "reached your … limit" phrasing without the remedy is not this class.
+    assert _parse_action_required_cap("You've reached your session limit.") is None
+    assert _parse_action_required_cap("") is None
+    assert _parse_action_required_cap(None) is None
+
+
+def test_action_cap_result_latches_and_bare_events_show_remedy(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    """#701 end-to-end: the no-time cap latches, and the next bare
+    rate_limit_event names the remedy instead of implying a ~60s wait."""
+    from untether.runners.claude import DEFAULT_BARE_RATE_LIMIT_WAIT_S
+
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            {
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "num_turns": 20,
+                "duration_ms": 450000,
+                "duration_api_ms": 420000,
+                "session_id": "action-cap-1",
+                "result": _ACTION_CAP_TEXT,
+            }
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert clean_action_latch
+    # No reset clause in this text → #692's latch stays empty.
+    assert clean_reset_latch == {}
+
+    state2 = ClaudeStreamState()
+    events = translate_claude_event(
+        _decode_event({"type": "rate_limit_event"}),
+        title="claude",
+        state=state2,
+        factory=state2.factory,
+    )
+    title = events[0].action.title
+    assert "Fable 5 limit reached" in title
+    assert "/usage-credits" in title
+    assert "/model" in title
+    # The whole point: no countdown copy.
+    assert "waiting to retry" not in title
+    assert "retrying in" not in title
+    # …but the stall detector still gets a deadline so a throttled session is
+    # not mistaken for a hung one.
+    assert state2.rate_limit_wait_until > 0
+    assert state2.rate_limit_total_s == DEFAULT_BARE_RATE_LIMIT_WAIT_S
+
+
+def test_reset_latch_beats_action_latch(clean_action_latch, clean_reset_latch) -> None:
+    """Tier order: a harvested reset time (#692) outranks the action remedy —
+    a real deadline is more actionable than a generic remedy hint."""
+    import time as _time
+
+    clean_reset_latch["default"] = (_time.monotonic() + 1800.0, "7:50pm (UTC)")
+    clean_action_latch["default"] = (_time.monotonic() + 1800.0, "Fable 5")
+
+    state = ClaudeStreamState()
+    events = translate_claude_event(
+        _decode_event({"type": "rate_limit_event"}),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "Rate limited until 7:50pm (UTC)" in events[0].action.title
+
+
+def test_expired_action_latch_pruned(clean_action_latch) -> None:
+    import time as _time
+
+    from untether.runners import claude as claude_mod
+
+    clean_action_latch["default"] = (_time.monotonic() - 5.0, "Fable 5")
+    assert claude_mod._latched_action_required() is None
+    assert clean_action_latch == {}
+
+
+def test_action_latch_falls_back_to_default_when_absent(clean_action_latch) -> None:
+    """#657 regression guard: an unlatched bare event keeps the 60s default."""
+    state = ClaudeStreamState()
+    events = translate_claude_event(
+        _decode_event({"type": "rate_limit_event"}),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "waiting to retry" in events[0].action.title
+
+
+def test_action_title_without_model_name() -> None:
+    from untether.runners.claude import _format_action_required_title
+
+    assert _format_action_required_title("").startswith("⛔ Model limit reached")
+    assert "/usage-credits" in _format_action_required_title("")
+
+
+# ---------------------------------------------------------------------------
+# #696 — pre-result post_result_idle.tick reports MEASURED pending state
+# ---------------------------------------------------------------------------
+
+
+def _log_kwargs(logger: _RecordingLogger, event: str) -> list[dict]:
+    """Every kwargs payload logged under ``event``, in order."""
+    return [kw for _lvl, name, kw in logger.records if name == event]
+
+
+async def _run_pre_result_watchdog(
+    monkeypatch, *, sid: str, channel_id: int
+) -> _RecordingLogger:
+    """Drive ``_post_result_idle_watchdog`` far enough to emit one pre-result
+    tick, then cancel. Shared by the two #696 tests."""
+    from untether.runners.claude import ClaudeRunner
+    from untether.runners.run_options import EngineRunOptions, apply_run_options
+    from untether.utils.paths import reset_run_channel_id, set_run_channel_id
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value=sid))
+    # Pre-result: the first ``result`` event has NOT landed.
+    state.result_received_at = None
+
+    real_sleep = anyio.sleep
+
+    async def fast_sleep(s: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr("untether.runners.claude.anyio.sleep", fast_sleep)
+
+    class _FakeStdin:
+        async def aclose(self) -> None:  # pragma: no cover - never reached
+            pass
+
+    logger = _RecordingLogger()
+    runner = ClaudeRunner(claude_cmd="claude")
+    token = set_run_channel_id(channel_id)
+    try:
+        with apply_run_options(EngineRunOptions(loop_enabled=False)):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(
+                    runner._post_result_idle_watchdog,
+                    state,
+                    _FakeStdin(),
+                    anyio.Event(),
+                    logger,
+                    600.0,
+                )
+                with anyio.move_on_after(2.0):
+                    while not _log_kwargs(logger, "claude.post_result_idle.tick"):
+                        await real_sleep(0)
+                tg.cancel_scope.cancel()
+    finally:
+        reset_run_channel_id(token)
+    return logger
+
+
+@pytest.mark.anyio
+async def test_696_pre_result_tick_reports_measured_pending_ask(monkeypatch) -> None:
+    """#696: a pre-result tick MUST measure pending_asks/pending_requests.
+
+    Before the fix the ``armed_at is None`` branch emitted both as literal
+    ``0`` while the post-result branch computed them — so a session sitting
+    on a visibly pending approval keyboard logged zeros every 30s and read
+    as a presenter/runner desync.
+    """
+    from untether.runners.claude import _PENDING_ASK_REQUESTS, _REQUEST_TO_SESSION
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    sid = "pre-result-pending-session"
+    # One pending control request and one pending ask owned by this session
+    # — the shape of a plan-mode approval wait.
+    _REQUEST_TO_SESSION["req_ctrl_1"] = sid
+    _REQUEST_TO_SESSION["req_ask_1"] = sid
+    _PENDING_ASK_REQUESTS["req_ask_1"] = (4242, "Which option?")
+    # A third request owned by a DIFFERENT session must not be counted.
+    _REQUEST_TO_SESSION["req_other"] = "some-other-session"
+
+    try:
+        logger = await _run_pre_result_watchdog(monkeypatch, sid=sid, channel_id=4242)
+    finally:
+        _REQUEST_TO_SESSION.clear()
+        _PENDING_ASK_REQUESTS.clear()
+
+    ticks = _log_kwargs(logger, "claude.post_result_idle.tick")
+    assert ticks, "pre-result tick must still fire"
+    tick = ticks[0]
+    assert tick["armed"] is False, "this must be the pre-result branch"
+    assert tick["session_id"] == sid
+    # Load-bearing: measured, not literal zero, and scoped to this session.
+    assert tick["pending_requests"] == 2
+    assert tick["pending_asks"] == 1
+
+
+@pytest.mark.anyio
+async def test_696_pre_result_tick_zero_when_nothing_pending(monkeypatch) -> None:
+    """#696 negative control: a genuinely idle pre-result tick still reads 0.
+
+    Guards against the fix turning every pre-result tick into a false
+    "waiting on the user" marker.
+    """
+    from untether.runners.claude import _PENDING_ASK_REQUESTS, _REQUEST_TO_SESSION
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    logger = await _run_pre_result_watchdog(
+        monkeypatch, sid="pre-result-idle", channel_id=4243
+    )
+
+    tick = _log_kwargs(logger, "claude.post_result_idle.tick")[0]
+    assert tick["armed"] is False
+    assert tick["pending_requests"] == 0
+    assert tick["pending_asks"] == 0
+
+
+# ---------------------------------------------------------------------------
+# #699 — one subcountdown_exit liveness line per subcountdown
+# ---------------------------------------------------------------------------
+
+
+class _ReapAfterPollsProc:
+    """Subprocess stub whose ``returncode`` flips to 0 after N reads.
+
+    Distinct from ``_FakeProc`` above, which holds a fixed returncode: these
+    tests need a subprocess that is alive on entry and reaped mid-loop, which
+    is the fast-reap shape #699 is about.
+    """
+
+    def __init__(self, pid: int = 987654, exit_after: int = 1) -> None:
+        self.pid = pid
+        self._exit_after = exit_after
+        self._reads = 0
+        self._returncode: int | None = None
+
+    @property
+    def returncode(self) -> int | None:
+        rc = self._returncode
+        self._reads += 1
+        if self._reads > self._exit_after:
+            self._returncode = 0
+        return rc
+
+
+@pytest.mark.anyio
+async def test_699_short_subcountdown_emits_exit_line() -> None:
+    """#699: a subcountdown shorter than the 30s tick throttle MUST still
+    emit exactly one liveness line.
+
+    Three subcountdowns on nsd (15s / 20s / 10s) each computed ``cpu_active``
+    several times and discarded every one, because the only exits to a log
+    line were the ~30s throttled ``subcountdown_tick`` and the one-shot
+    ``limbo_detected``. That blackout blocked #689's Linux-collateral
+    verification for 7 of 12 audit passes.
+    """
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.01
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="short-subcountdown"))
+    state.result_received_at = time.monotonic()
+
+    logger = _RecordingLogger()
+    proc = _ReapAfterPollsProc(exit_after=1)
+
+    reason = await runner._post_result_subcountdown(
+        state=state,
+        proc=proc,
+        run_logger=logger,
+        timeout_s=600.0,
+        stream=None,
+        session_id="short-subcountdown",
+        limbo_grace_s=0.0,
+        bg_max_hold_s=0.0,
+    )
+
+    assert reason == "subprocess_exited_during_subcountdown"
+
+    # The 30s throttled tick did NOT fire — precisely the blackout #699
+    # describes, and the reason the exit line has to exist.
+    assert not _log_kwargs(logger, "claude.post_result_idle.subcountdown_tick")
+
+    exits = _log_kwargs(logger, "claude.post_result_idle.subcountdown_exit")
+    assert len(exits) == 1, "exactly one exit line per subcountdown"
+    line = exits[0]
+    assert line["exit_reason"] == "subprocess_exited"
+    assert line["session_id"] == "short-subcountdown"
+    assert line["pid"] == proc.pid
+    assert line["polls"] >= 1
+    assert line["in_limbo"] is False
+    # No prev_diag on a single poll, so the verdict is legitimately unknown.
+    assert line["cpu_active"] is None
+    assert line["tree_active"] is None
+
+
+@pytest.mark.anyio
+async def test_699_subcountdown_exit_carries_last_liveness_verdict(
+    monkeypatch,
+) -> None:
+    """#699: the exit line carries the LAST computed cpu/tree verdict.
+
+    This is the sample previously computed per-poll and thrown away —
+    without it, #689's ``demonstrably_busy`` gate is unobservable on any
+    subcountdown that ends inside 30s.
+    """
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.utils.proc_diag import ProcessDiag
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    monkeypatch.setattr(
+        "untether.utils.proc_diag.collect_proc_diag",
+        lambda pid: ProcessDiag(pid=pid, alive=True, cpu_utime=1, cpu_stime=0),
+    )
+    monkeypatch.setattr(
+        "untether.utils.proc_diag.is_cpu_active", lambda prev, curr: True
+    )
+    monkeypatch.setattr(
+        "untether.utils.proc_diag.is_tree_cpu_active", lambda prev, curr: False
+    )
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.01
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="busy-subcountdown"))
+    state.result_received_at = time.monotonic()
+
+    logger = _RecordingLogger()
+    # Exit on the 3rd poll so prev_diag exists and a real verdict is computed.
+    proc = _ReapAfterPollsProc(exit_after=3)
+
+    await runner._post_result_subcountdown(
+        state=state,
+        proc=proc,
+        run_logger=logger,
+        timeout_s=600.0,
+        stream=None,
+        session_id="busy-subcountdown",
+        limbo_grace_s=0.0,
+        bg_max_hold_s=0.0,
+    )
+
+    line = _log_kwargs(logger, "claude.post_result_idle.subcountdown_exit")[0]
+    assert line["cpu_active"] is True
+    assert line["tree_active"] is False
+    assert line["exit_reason"] == "subprocess_exited"
+    assert line["polls"] >= 2

@@ -90,6 +90,7 @@ systemctl --user restart untether-dev    # dev
 | `voice_transcription_api_key` | string\|null | `null` | Override API key for voice transcription only. |
 | `voice_transcription_language` | string\|null | `null` | ([#638](https://github.com/littlebearapps/untether/issues/638)) Optional ISO-639-1 language hint (e.g. `"en"`) passed to the Whisper `language` param — stops wrong-language guesses on short voice notes. Unset = provider auto-detect. Hot-reloadable. |
 | `voice_transcription_prompt` | string\|null | `null` | ([#691](https://github.com/littlebearapps/untether/issues/691)) Optional vocabulary/context hint passed to the transcription provider, for example project names or technical terms. Provider support varies; overly broad prompts can bias transcription. Hot-reloadable. |
+| `voice_transcription_prompt` | string\|null | `null` (→ built-in) | ([#691](https://github.com/littlebearapps/untether/issues/691), [#703](https://github.com/littlebearapps/untether/issues/703)) Vocabulary-bias prompt (≤1000 chars) passed to the transcription `prompt` param — steers the decoder toward domain proper nouns (`"Trello, Untether, Claude Code"`). Effect is model-dependent; keep it to high-frequency nouns (overstuffing can induce hallucinated terms). **Unset = a shipped product-generic default** (engine + tool names); a value **replaces** that default; `""` disables the bias and omits the parameter. Hot-reloadable. |
 | `session_mode` | `"stateless"`\|`"chat"` | `"stateless"` | 🔄 Auto-resume mode. See [workflow modes](modes.md) — `"chat"` for assistant/workspace, `"stateless"` for handoff. Restart-required. |
 | `show_resume_line` | bool | `true` | Show resume line in message footer. See [workflow modes](modes.md) — `false` for assistant/workspace, `true` for handoff. |
 
@@ -256,6 +257,8 @@ Per-chat override: `/verbose on` and `/verbose off` override the config default 
     max_cost_per_day = 10.00
     warn_at_pct = 70
     auto_cancel = false
+    warn_run_above_usd = 20.00
+    notify_run_outlier = true
     ```
 
 | Key | Type | Default | Notes |
@@ -265,8 +268,20 @@ Per-chat override: `/verbose on` and `/verbose off` override the config default 
 | `max_cost_per_day` | float\|null | `null` | Daily cost limit (USD). |
 | `warn_at_pct` | int | `70` | Warning threshold (0–100). |
 | `auto_cancel` | bool | `false` | Auto-cancel runs that exceed the per-run limit. |
+| `warn_run_above_usd` | float\|null | `null` (→ `20.00`) | Per-run spend alert that fires **without** `enabled = true`. `0` disables it. |
+| `notify_run_outlier` | bool | `true` | Show the outlier as a chat line. The `cost.run_outlier` log event fires either way. |
 
 Budget alerts always appear regardless of `[footer]` settings.
+
+!!! tip "The outlier alert works with no budget configured"
+    Everything above `warn_run_above_usd` is gated on `enabled = true`, so a
+    deployment with no `[cost_budget]` block gets no spend signal at any
+    amount — the one configuration where an alarm matters most
+    ([#702](https://github.com/littlebearapps/untether/issues/702)). The
+    per-run outlier alert is deliberately independent: it logs
+    `cost.run_outlier` and adds one chat line for any single run above the
+    threshold (default US$20), whatever `[footer] show_api_cost` is set to.
+    Set `notify_run_outlier = false` to keep the log without the chat line.
 
 !!! note "Cumulative session cost is not capped"
     Sessions can stack many runs via `/continue`, follow-up prompts, or

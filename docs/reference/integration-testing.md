@@ -1,15 +1,24 @@
 # Integration Testing
 
-Structured, repeatable integration test process run against `@untether_dev_bot` before every release. Tests exercise all 6 engines across the full feature surface.
+Structured, repeatable integration test process run against `@untether_dev_bot` before every release. Tests exercise all 4 supported engines across the full feature surface.
+
+> **Deprecated engines are out of the matrix.** `gemini` and `amp` are deprecated
+> and targeted for removal in 0.36.0. Both are currently non-functional on the
+> dev host — Gemini rejects individual accounts (upstream EOL 2026-06-18) and AMP
+> returns `426` for out-of-date clients — so they **cannot** pass U1 and are no
+> longer required at any release tier. Their chats and test projects stay in
+> place for opt-in spot checks only. See
+> [`runner-development.md`](../../.claude/rules/runner-development.md) →
+> "Deprecated engines — sweep exemption".
 
 ## Infrastructure
 
 | | Details |
 |---|---|
 | **Dev service** | `untether-dev.service` → `@untether_dev_bot` |
-| **Test projects** | `test-projects/test-{claude,codex,opencode,pi,gemini,amp}/` |
-| **Test chats** | 6 dedicated Telegram groups in the `ut-dev` folder, one per engine |
-| **Engines** | Claude, Codex, OpenCode, Pi, Gemini, Amp |
+| **Test projects** | `test-projects/test-{claude,codex,opencode,pi}/` (plus deprecated `test-{gemini,amp}/`) |
+| **Test chats** | 6 dedicated Telegram groups in the `ut-dev` folder, one per engine (2 deprecated) |
+| **Engines** | Claude, Codex, OpenCode, Pi (⚠️ Gemini, Amp — deprecated, opt-in only) |
 
 ## Automated Testing via Telegram MCP
 
@@ -72,8 +81,9 @@ These tests were previously considered "manual" but can be automated via MCP and
 
 ## Engine Feature Matrix
 
-| Capability | Claude | Codex | OpenCode | Pi | Gemini | Amp |
+| Capability | Claude | Codex | OpenCode | Pi | Gemini ⚠️ | Amp ⚠️ |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|
+| **Support status** | Yes | Yes | Yes | Yes | Deprecated | Deprecated |
 | Interactive approval | Yes | - | - | - | Flag only | - |
 | Plan mode | Yes | - | - | - | - | - |
 | Ask questions | Yes | - | - | - | - | - |
@@ -88,9 +98,11 @@ These tests were previously considered "manual" but can be automated via MCP and
 
 ## Test Tiers
 
-### Tier 1: Universal Tests (all 6 engines)
+### Tier 1: Universal Tests (all 4 supported engines)
 
-Run in every engine's dedicated chat. Validates the core event pipeline.
+Run in every supported engine's dedicated chat. Validates the core event pipeline.
+The deprecated `gemini` and `amp` chats are excluded — they cannot pass U1 and are
+not required at any tier.
 
 | # | Test | What to send | What to verify | Catches |
 |---|------|-------------|----------------|---------|
@@ -142,7 +154,7 @@ Tests for per-chat and per-topic settings that affect run behaviour. Use forum t
 
 | # | Test | What to send | What to verify | Catches |
 |---|------|-------------|----------------|---------|
-| O1 | **Engine override** | `/agent set gemini`, then send a plain prompt (no directive) | Gemini runs, footer shows Gemini model | Per-chat engine default, override hierarchy |
+| O1 | **Engine override** | `/agent set opencode`, then send a plain prompt (no directive) | OpenCode runs, footer shows OpenCode model | Per-chat engine default, override hierarchy |
 | O2 | **Reasoning level** | `/config` → Reasoning → enable, then send a prompt | Reasoning model used, footer reflects it | Reasoning flag in build_args |
 | O3 | **Listen mode** | `/listen mentions` in group, send plain text, then `@bot do something` | Plain text ignored, @mention triggers run | Listen mode filtering (renamed from `/trigger` in v0.35.3 [#297](https://github.com/littlebearapps/untether/issues/297); deprecated alias still works) |
 | O4 | **Ask mode toggle** | `/config` → Ask → off, send prompt that would trigger AskUserQuestion | Question auto-denied instead of shown | Ask mode auto-deny path |
@@ -309,7 +321,8 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
    Claude Code sends each command to an engine chat via MCP, verifies responses
 
 5. Run Tier 1 (universal) — 30 minutes
-   Claude Code runs U1-U10 in ALL 6 engine chats via MCP
+   Claude Code runs U1-U10 in the 4 supported engine chats via MCP
+   (skip the deprecated gemini/amp chats — they cannot pass U1)
    Focus on: progress rendering, final message, model footer, resume
 
 6. Run Tier 2 (Claude-specific) — 15 minutes

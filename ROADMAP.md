@@ -4,6 +4,8 @@ This roadmap reflects the project's direction based on recent development and co
 
 ## Near-term
 
+- **Antigravity CLI engine** — new engine backend for Google's [Antigravity CLI](https://antigravity.google) (`agy`), the successor to Gemini CLI. A **distinct engine**, not a Gemini rename: authentication, CLI flags, and session semantics all differ, so it will register under its own `antigravity` engine id. Targeted for v0.36.0 ([#558](https://github.com/littlebearapps/untether/issues/558))
+- **Retire the Gemini CLI and Amp engines** — both deprecated in v0.35.5 and scheduled for removal in v0.36.0, alongside the Amp-only `/threads` command. Gemini CLI reached end-of-life for individual and free Google accounts on 18 June 2026; the Amp integration is unmaintained. See [deprecated engines](README.md#deprecated-engines) ([#720](https://github.com/littlebearapps/untether/issues/720), [#458](https://github.com/littlebearapps/untether/issues/458), [#722](https://github.com/littlebearapps/untether/issues/722))
 - **Additional transport backends** — Discord and Slack transports via the plugin system
 - **Improved onboarding diagnostics** — expand `untether doctor` with network, permission, and engine health checks
 
@@ -16,8 +18,8 @@ This roadmap reflects the project's direction based on recent development and co
 
 ## Shipped
 
-- **Gemini CLI engine** — full integration with Google's Gemini CLI via stream-json (shipped across v0.34.x–v0.35.x)
-- **Amp engine** — full integration with Sourcegraph's Amp coding agent via stream-json (shipped across v0.34.x–v0.35.x)
+- **Gemini CLI engine** — full integration with Google's Gemini CLI via stream-json (shipped across v0.34.x–v0.35.x; ⚠️ **deprecated in v0.35.5**, removal in v0.36.0 — upstream end-of-life)
+- **Amp engine** — full integration with Sourcegraph's Amp coding agent via stream-json (shipped across v0.34.x–v0.35.x; ⚠️ **deprecated in v0.35.5**, removal in v0.36.0 — integration unmaintained)
 - **Webhook-driven workflows** — trigger agent runs from CI/CD events, GitHub webhooks, or external services (shipped in v0.28.0 as the triggers system with cron and webhook support)
 - **Session statistics** — `/stats` command for per-engine run counts, actions, and duration across today/week/all-time (shipped in v0.30.0)
 - **Device re-authentication** — `/auth` command for headless Codex re-auth via Telegram (shipped in v0.30.0)

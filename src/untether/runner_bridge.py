@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import os
 import signal as _signal
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -14,7 +15,7 @@ import anyio
 from .context import RunContext
 from .error_hints import get_error_hint as _get_error_hint
 from .logging import bind_run_context, get_logger
-from .markdown import format_meta_line, render_event_cli
+from .markdown import _short_model_name, format_meta_line, render_event_cli
 from .model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent, UntetherEvent
 from .presenter import Presenter
 from .progress import ProgressTracker
@@ -54,6 +55,33 @@ class _StuckAfterToolResultState:
 # `@modelcontextprotocol/*` stdio bridges share the same failure mode.
 _MCP_ADAPTER_CMDLINE_HINTS = ("mcp-remote", "@modelcontextprotocol")
 
+
+def _model_log_fields(meta: dict[str, Any] | None) -> dict[str, object]:
+    """#695: resolved model as loggable fields, or ``{}`` when unknown.
+
+    The model lives only in ``StartedEvent.meta``, which until now was
+    consumed for rendering and never logged — so a footer regression like
+    #688 (``claude-opus-5[1m]`` shortening to a bare ``opus``, silently
+    dropping the 1M-context marker) was invisible to log-side auditing and
+    to the log-only ``untether-issue-watcher``.
+
+    Both halves are logged deliberately: ``model`` is the raw ID from the
+    engine, ``model_display`` is the *same string the footer renders*, taken
+    from ``_short_model_name`` rather than re-derived, so the pair makes a
+    shortener regression self-evident from logs alone.
+
+    Returns an empty dict rather than ``model=None`` when meta carries no
+    model — some engines ship it late (pi sends the model from
+    ``message_end`` via a supplementary ``StartedEvent``, per
+    ``.claude/rules/runner-development.md``), and an absent key reads as
+    "not reported" where ``None`` reads as "reported as nothing".
+    """
+    model = (meta or {}).get("model")
+    if not isinstance(model, str) or not model:
+        return {}
+    return {"model": model, "model_display": _short_model_name(model)}
+
+
 # ---------------------------------------------------------------------------
 # Ephemeral message registry
 # ---------------------------------------------------------------------------
@@ -82,6 +110,63 @@ def register_ephemeral_message(
     key = (channel_id, anchor_message_id)
     _EPHEMERAL_MSGS.setdefault(key, []).append(ref)
     _EPHEMERAL_MSGS_TS[key] = _time.monotonic()
+
+
+# ---------------------------------------------------------------------------
+# #709: AskUserQuestion tracked-action registry
+# ---------------------------------------------------------------------------
+# Two writers own the progress message and only one of them had state. The
+# ``aq`` callback handler advances a multi-question flow by editing the
+# message directly, but the ProgressTracker still held the AskUserQuestion
+# control action with its INTERCEPT-time title and keyboard — so the next
+# heartbeat re-render regenerated the message from that unchanged model and
+# clobbered the edit, showing Q1's text and Q1's option labels while Q2 was
+# outstanding. This registry lets the handler advance the model too.
+#
+# Keyed by request_id (which the flow already carries). Same TTL sweep as the
+# other run-scoped registries above.
+
+_ASK_ACTION_MODEL: dict[str, tuple[ProgressTracker, str]] = {}
+_ASK_ACTION_MODEL_TS: dict[str, float] = {}
+
+
+def register_ask_action_model(
+    request_id: str, tracker: ProgressTracker, action_id: str
+) -> None:
+    """Record which tracked action renders *request_id*'s question."""
+    import time as _time
+
+    _ASK_ACTION_MODEL[request_id] = (tracker, action_id)
+    _ASK_ACTION_MODEL_TS[request_id] = _time.monotonic()
+
+
+def advance_ask_action_model(
+    request_id: str,
+    *,
+    title: str,
+    buttons: list[list[dict[str, str]]] | None,
+) -> bool:
+    """Point the tracked action at the flow's CURRENT question.
+
+    ``buttons=None`` clears the keyboard from the model — used when the flow
+    is answered, so the renderer's newest-first keyboard scan (#683) stops
+    finding this action instead of the handler racing an edit against it.
+    """
+    entry = _ASK_ACTION_MODEL.get(request_id)
+    if entry is None:
+        return False
+    tracker, action_id = entry
+    detail = dict(tracker.action_detail(action_id) or {})
+    if buttons is None:
+        detail.pop("inline_keyboard", None)
+    else:
+        detail["inline_keyboard"] = {"buttons": buttons}
+    return tracker.update_action(action_id, title=title, detail=detail)
+
+
+def clear_ask_action_model(request_id: str) -> None:
+    _ASK_ACTION_MODEL.pop(request_id, None)
+    _ASK_ACTION_MODEL_TS.pop(request_id, None)
 
 
 # Outline message cleanup registry.
@@ -148,6 +233,11 @@ def sweep_stale_registries(now: float | None = None) -> int:
         if now - ts > _REGISTRY_TTL_SECONDS:
             _OUTLINE_REGISTRY.pop(sid, None)
             _OUTLINE_REGISTRY_TS.pop(sid, None)
+            pruned += 1
+    for rid, ts in list(_ASK_ACTION_MODEL_TS.items()):
+        if now - ts > _REGISTRY_TTL_SECONDS:
+            _ASK_ACTION_MODEL.pop(rid, None)
+            _ASK_ACTION_MODEL_TS.pop(rid, None)
             pruned += 1
     if pruned:
         logger.info("runner_bridge.registries_swept", pruned=pruned)
@@ -265,6 +355,7 @@ def _should_auto_continue(
     auto_continued_count: int,
     max_retries: int,
     proc_returncode: int | None = None,
+    saw_result: bool = False,
 ) -> bool:
     """Detect a Claude Code run that exited without processing its tool results.
 
@@ -296,10 +387,36 @@ def _should_auto_continue(
     for Claude it is now always populated (`runners/claude.py`, run_impl).
     14 days of fleet data showed 47/49 auto-continues at rc=0 and 2 at
     rc=143 — the latter being exactly the leak this gate now closes.
+
+    #716 — the ``a result frame would exclude the predicate entirely``
+    claim above was **assumed, never enforced**. It reads
+    ``last_event_type``, a running value that records the last frame seen
+    rather than whether the run reached its result, and the two come apart:
+    106 healthy (``ok=True``, uncancelled) Claude runs on nsd logged
+    ``last_event_type=user``, satisfying every gate here. Nothing but the
+    caller's ``final_delivery["sent"]`` check stopped a salvage re-spawn of
+    a finished run.
+
+    The claim is now enforced by ``saw_result``, a monotonic per-run latch
+    set when a ``result`` frame is parsed. That is the sound
+    discriminator for this predicate: neither upstream defect emits a
+    ``result`` at all (claude-code#34142 skips the assistant continuation
+    after a tool_result; #30333 never emits ResultMessage with background
+    subagents), so gating on it preserves both mitigations exactly while
+    excluding runs that finished.
+
+    Note what this does NOT claim: the trailing-frame mechanism #716
+    hypothesised is disproven — a frame after the terminal ``result``
+    cannot reach the stream, because the CompletedEvent breaks the read
+    loop (see ``JsonlStreamState.saw_result``). A ``user`` value on a
+    completed run means the result never landed on that stream object, and
+    the reason for that is tracked separately.
     """
     if cancelled:
         return False
     if engine != "claude":
+        return False
+    if saw_result:
         return False
     if last_event_type != "user":
         return False
@@ -742,6 +859,143 @@ def _format_run_cost(usage: dict[str, Any] | None) -> str | None:
     return " · ".join(parts) or None
 
 
+# #658: one-shot per process — see _warn_cost_visibility_gap.
+_cost_visibility_gap_warned = False
+_cost_visibility_gap_lock = threading.Lock()
+
+
+def _warn_cost_visibility_gap(cost: float, settings: Any, budget_enabled: bool) -> None:
+    """#658: emit ONE ``config.cost_visibility_gap`` WARNING per process when
+    real API spend is neither displayed (``[footer] show_api_cost=false``)
+    nor bounded (no effective ``[cost_budget]``) — without it the operator
+    has no in-product moment to learn the burn rate. Pure config-shape
+    inspection; no billing inference. The fleet's issue watcher ingests
+    WARNING-level events, so log-only still reaches the operator.
+    """
+    global _cost_visibility_gap_warned
+    budget_cfg = settings.cost_budget
+    no_effective_budget = not budget_enabled or (
+        budget_cfg.max_cost_per_run is None and budget_cfg.max_cost_per_day is None
+    )
+    footer = settings.footer
+    if not no_effective_budget or footer.show_api_cost:
+        return
+    with _cost_visibility_gap_lock:
+        if _cost_visibility_gap_warned:
+            return
+        _cost_visibility_gap_warned = True
+    logger.warning(
+        "config.cost_visibility_gap",
+        total_cost_usd=cost,
+        cost_budget_enabled=budget_enabled,
+        has_per_run_budget=budget_cfg.max_cost_per_run is not None,
+        has_per_day_budget=budget_cfg.max_cost_per_day is not None,
+        show_api_cost=footer.show_api_cost,
+        show_subscription_usage=footer.show_subscription_usage,
+    )
+
+
+def _run_shape_fields(usage: dict[str, Any], cost: float) -> dict[str, Any]:
+    """#717: the ``cost.run_outlier`` fields that explain a spend figure.
+
+    ``num_turns`` is the single highest-value discriminator; ``duration_api_ms``
+    separates "slow and expensive" from "fast and expensive"; the cache-read /
+    input token pair makes the context-bloat case self-evident (a high
+    cache-read-to-input ratio is the 2-turn/$20 signature). ``usd_per_turn``
+    is derived, but it is the number an operator reads first.
+
+    Every field is best-effort: engines other than Claude may populate a
+    different subset, so anything absent is simply omitted rather than logged
+    as ``None``. Never raises — the caller is on the delivery path.
+    """
+    fields: dict[str, Any] = {}
+    num_turns = usage.get("num_turns")
+    if isinstance(num_turns, int):
+        fields["num_turns"] = num_turns
+        if num_turns > 0:
+            fields["usd_per_turn"] = round(cost / num_turns, 4)
+    for key in ("duration_ms", "duration_api_ms"):
+        value = usage.get(key)
+        if isinstance(value, int):
+            fields[key] = value
+    tokens = usage.get("usage")
+    if isinstance(tokens, dict):
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ):
+            value = tokens.get(key)
+            if isinstance(value, int):
+                fields[key] = value
+    return fields
+
+
+def _check_run_cost_outlier(usage: dict[str, Any] | None) -> str | None:
+    """#702: emit ``cost.run_outlier`` for any single run above the threshold,
+    **regardless of whether a ``[cost_budget]`` is configured**, and return the
+    one-line chat notice (or ``None``).
+
+    #658's ``config.cost_visibility_gap`` is a once-per-process config-shape
+    diagnostic and works as designed — but it means a session can spend
+    unboundedly after that single line. ``check_run_budget`` returns early
+    without a configured budget, so ``warn_at_pct`` never evaluates and no
+    alert can fire at any spend level. This is the signal that survives an
+    empty ``[cost_budget]``.
+
+    Fail-open like :func:`_check_cost_budget`: a config read that blows up must
+    never take down the delivery path.
+    """
+    if not usage:
+        return None
+    cost = usage.get("total_cost_usd")
+    if cost is None or cost <= 0:
+        return None
+    try:
+        from .cost_tracker import DEFAULT_RUN_OUTLIER_USD
+        from .settings import load_settings_if_exists
+
+        result = load_settings_if_exists()
+        if result is None:
+            return None
+        settings, _ = result
+        budget_cfg = settings.cost_budget
+        threshold = budget_cfg.warn_run_above_usd
+        if threshold is None:
+            threshold = DEFAULT_RUN_OUTLIER_USD
+        if threshold <= 0 or cost < threshold:
+            return None
+        footer = settings.footer
+        logger.warning(
+            "cost.run_outlier",
+            total_cost_usd=cost,
+            threshold_usd=threshold,
+            budget_configured=budget_cfg.enabled,
+            show_api_cost=footer.show_api_cost,
+            show_subscription_usage=footer.show_subscription_usage,
+            # #717: the shape of the spend, not just its size. Without these
+            # a 2-turn $20.50 run and a 40-turn $19.58 run are identical in
+            # the log, and they call for opposite operator responses — the
+            # first says "this session's context has grown expensive, start
+            # a fresh one", the second says "big task, nothing to do".
+            # All of it already sits in the `usage` dict this function
+            # receives (`_usage_payload` in runners/claude.py); it was
+            # simply not forwarded.
+            **_run_shape_fields(usage, cost),
+        )
+        if not budget_cfg.notify_run_outlier:
+            return None
+        return f"\U0001f4b8 This run cost ${cost:.2f} (over the ${threshold:.2f} alert)"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "cost.run_outlier_check_failed",
+            error=str(exc),
+            error_type=exc.__class__.__name__,
+        )
+        return None
+
+
 def _check_cost_budget(
     usage: dict[str, Any] | None,
 ) -> tuple[str | None, object | None]:
@@ -783,6 +1037,7 @@ def _check_cost_budget(
             budget_enabled = run_options.budget_enabled
         else:
             budget_enabled = budget_cfg.enabled
+        _warn_cost_visibility_gap(cost, settings, budget_enabled)
         if not budget_enabled:
             return None, None
 
@@ -948,6 +1203,10 @@ class RunningTask:
     cancel_requested: anyio.Event = field(default_factory=anyio.Event)
     done: anyio.Event = field(default_factory=anyio.Event)
     context: RunContext | None = None
+    # #690: live ProgressEdits for this run — exposes the engine subprocess
+    # PID (edits.pid) so the drain's self-restart evidence scan can walk the
+    # run's process tree.
+    edits: ProgressEdits | None = None
 
 
 RunningTasks = dict[MessageRef, RunningTask]
@@ -2824,6 +3083,14 @@ class ProgressEdits:
     async def on_event(self, evt: UntetherEvent) -> None:
         if not self.tracker.note_event(evt):
             return
+        # #709: an AskUserQuestion control action is advanced by the `aq`
+        # callback handler, not by further engine events — bind it to this
+        # tracker so the handler can move the MODEL and the heartbeat
+        # re-render agrees with what the user was just shown.
+        if isinstance(evt, ActionEvent) and evt.action.detail.get("ask_flow"):
+            _ask_rid = evt.action.detail.get("request_id")
+            if isinstance(_ask_rid, str) and _ask_rid:
+                register_ask_action_model(_ask_rid, self.tracker, str(evt.action.id))
         if self.progress_ref is None:
             return
         now = self.clock()
@@ -3216,9 +3483,20 @@ async def run_runner_with_cancel(
         liveness_stalls=edits.stream.liveness_stalls if edits.stream else 0,
         peak_idle_seconds=round(edits._peak_idle, 1),
         last_event_type=edits.stream.last_event_type if edits.stream else None,
+        # #716: `last_event_type` alone cannot answer "did this run reach its
+        # result?" — a trailing frame overwrites it. Logging the latch makes
+        # `session.summary` self-describing for log-side auditing, so a
+        # `last_event_type=user` line can be read as healthy-with-trailing-
+        # frame rather than as a stuck-after-tool_result candidate.
+        saw_result=bool(getattr(edits.stream, "saw_result", False))
+        if edits.stream
+        else False,
         cancelled=outcome.cancelled,
         ok=outcome.completed.ok if outcome.completed else None,
         stall_suppressions=suppression_summary,
+        # #695: both events carry the model so a single grep over either
+        # answers "which model ran this session?".
+        **_model_log_fields(edits.tracker.meta),
     )
     if event_count == 0 and not outcome.cancelled:
         logger.warning(
@@ -3901,6 +4179,10 @@ async def handle_message(
             action_count=progress_tracker.action_count,
             resume=resume_value,
             **usage_log,
+            # #695: per-run model attribution. Also gives the cost fields
+            # above something to attribute to — `total_cost_usd` was
+            # previously logged with no record of which model produced it.
+            **_model_log_fields(progress_tracker.meta),
         )
         # Record session stats for /stats command
         from .session_stats import record_run as _record_stats_run
@@ -3978,6 +4260,17 @@ async def handle_message(
                 extra=final_rendered.extra,
             )
 
+        # #702: the outlier notice is deliberately NOT gated on `_show_cost` —
+        # the operator with the most need to know is the one who turned the
+        # footer off. Suppressed only when a budget alert already surfaced this
+        # run's spend, so a configured budget doesn't produce two lines.
+        _outlier_text = _check_run_cost_outlier(completed.usage)
+        if _outlier_text and _cost_alert_obj is None:
+            final_rendered = RenderedMessage(
+                text=_insert_before_resume(final_rendered.text, f"\n{_outlier_text}"),
+                extra=final_rendered.extra,
+            )
+
         # Append usage footer for Claude Code engine runs
         if runner.engine == "claude":
             _show_sub = footer_cfg.show_subscription_usage
@@ -4029,7 +4322,7 @@ async def handle_message(
 
     running_task: RunningTask | None = None
     if running_tasks is not None and progress_ref is not None:
-        running_task = RunningTask(context=context)
+        running_task = RunningTask(context=context, edits=edits)
         running_tasks[progress_ref] = running_task
 
     cancel_exc_type = anyio.get_cancelled_exc_class()
@@ -4287,9 +4580,17 @@ async def handle_message(
     _ac_resume = completed.resume or outcome.resume
     _ac_last_event = edits.stream.last_event_type if edits.stream else None
     _ac_proc_rc = edits.stream.proc_returncode if edits.stream else None
+    _ac_saw_result = bool(getattr(edits.stream, "saw_result", False))
     # #591: a run whose answer was already delivered can never need the
-    # auto-continue salvage (belt-and-braces — _should_auto_continue already
-    # excludes last_event_type == "result").
+    # auto-continue salvage.
+    # #716: this delivery check used to be described as "belt-and-braces"
+    # against a predicate that "already excludes last_event_type ==
+    # 'result'". That had it backwards — the predicate read a *running*
+    # value that says nothing about whether the run reached its result, so
+    # on the 106 nsd runs that ended `last_event_type=user` while healthy,
+    # `final_delivery["sent"]` was the ONLY thing holding the line. The
+    # predicate now discriminates on its own via `saw_result`; this stays
+    # as a genuine second gate, not a redundant one.
     if (
         ac_settings.enabled
         and not final_delivery["sent"]
@@ -4301,6 +4602,7 @@ async def handle_message(
             auto_continued_count=_auto_continued_count,
             max_retries=ac_settings.max_retries,
             proc_returncode=_ac_proc_rc,
+            saw_result=_ac_saw_result,
         )
     ):
         # #568: emit the fields a future narrowing decision would need.

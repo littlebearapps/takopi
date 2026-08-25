@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  Works with <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a> · <a href="https://github.com/openai/codex">Codex</a> · <a href="https://github.com/opencode-ai/opencode">OpenCode</a> · <a href="https://github.com/nicholasgasior/pi">Pi</a> · <a href="https://github.com/google-gemini/gemini-cli">Gemini CLI</a> · <a href="https://ampcode.com">Amp</a>
+  Works with <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a> · <a href="https://github.com/openai/codex">Codex</a> · <a href="https://github.com/opencode-ai/opencode">OpenCode</a> · <a href="https://github.com/nicholasgasior/pi">Pi</a>
 </p>
 
 <p align="center">
@@ -88,13 +88,13 @@ The wizard offers three **workflow modes** — pick the one that fits:
 
 - 📡 **Progress streaming** — watch your agent work in real time; see tool calls, file changes, and elapsed time as they happen
 - 🔐 **Interactive permissions** — approve plan transitions and answer clarifying questions with inline option buttons; tools auto-execute, and "Pause & Outline Plan" holds the session open while you review the plan outline before approving
-- 📋 **Plan mode** — toggle per chat with `/planmode`; choose full manual approval, auto-approved transitions, or no plan phase
+- 📋 **Permission modes** — toggle per chat with `/planmode`; choose full manual approval, auto-approved plan transitions, Claude Code's own classifier-gated auto mode, or no plan phase
 - 📁 **Projects and worktrees** — register repos with `untether init`, target with `/myproject @feat/thing`, run branches in isolated worktrees in parallel
-- 💰 **Cost and usage tracking** — run agents remotely with confidence; per-run and daily budgets, `/usage` breakdowns, and optional auto-cancel keep spending visible
+- 💰 **Cost and usage tracking** — run agents remotely with confidence; per-run and daily budgets, `/usage` breakdowns, and optional auto-cancel keep spending visible. A per-run outlier alert fires even with no budget configured, so an expensive run can't pass unnoticed
 - 💡 **Actionable error hints** — friendly messages for API outages, rate limits, billing errors, and network failures with resume guidance
-- 🏷 **Model and mode metadata** — every completed message shows model with version, effort level, and permission mode (e.g. `🏷 opus 4.6 · medium · plan`) across all engines
-- 🎙️ **Voice notes** — hands full? Dictate tasks instead of typing; Untether transcribes via a configurable Whisper-compatible endpoint
-- 🔄 **Cross-environment resume** — start a session in your terminal, pick it up from Telegram with `/continue`; works with Claude Code, Codex, OpenCode, Pi, and Gemini ([guide](docs/how-to/cross-environment-resume.md))
+- 🏷 **Model and mode metadata** — every completed message shows model with version, effort level, and permission mode (e.g. `🏷 opus 5 · medium · plan`) across all engines
+- 🎙️ **Voice notes** — hands full? Dictate tasks instead of typing; Untether transcribes via a configurable Whisper-compatible endpoint, with a vocabulary bias so tool and project names survive transcription
+- 🔄 **Cross-environment resume** — start a session in your terminal, pick it up from Telegram with `/continue`; works with Claude Code, Codex, OpenCode, and Pi ([guide](docs/how-to/cross-environment-resume.md))
 - 📎 **File transfer** — upload files to your repo with `/file put`, download with `/file get`; agents can also deliver files automatically by writing to `.untether-outbox/` during a run — sent as Telegram documents on completion, with whole directories optionally bundled as a zip (`outbox_deliver_directories = "zip"`)
 - 🛡️ **Graceful recovery** — orphan progress messages cleaned up on restart; stall detection with CPU-aware diagnostics; auto-continue for Claude Code sessions that exit prematurely
 - ⏰ **Scheduled tasks** — cron expressions with timezone support, webhook triggers, one-shot delays (`/at 30m <prompt>`), `run_once` crons, master pause/resume toggle, and hot-reload configuration (no restart required). `/ping` shows per-chat trigger summary; trigger-initiated runs show provenance in the footer (`⏰ cron:<id>` / `⚡ webhook:<id>` / `⏰ at:<token>`); `/stats` reports per-engine triggered-vs-manual breakdown
@@ -102,7 +102,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 - 💬 **Forum topics** — map Telegram topics to projects and branches
 - 📤 **Session export** — `/export` for markdown or JSON transcripts
 - 🗂️ **File browser** — `/browse` to navigate project files with inline buttons
-- ⚙️ **Inline settings** — `/config` opens an in-place settings menu; toggle plan mode, ask mode, approval policy (Codex), approval mode (Gemini), verbose, engine, model, reasoning, and listen mode with buttons; dedicated `📡 Triggers` page lists per-chat crons/webhooks with last-fired times and a master pause/resume toggle
+- ⚙️ **Inline settings** — `/config` opens an in-place settings menu; toggle plan mode, ask mode, approval policy (Codex), verbose, engine, model, reasoning, and listen mode with buttons; dedicated `📡 Triggers` page lists per-chat crons/webhooks with last-fired times and a master pause/resume toggle
 - 🔄 **Hot-reload configuration** — edit `untether.toml` and changes apply in ~1 second; covers triggers, voice transcription, allowed-user lists, watchdog timing, progress verbosity, file-transfer/outbox config, and per-engine overrides. Only `bot_token`, `chat_id`, `session_mode`, `topics`, and `message_overflow` require a restart. Extend the engine-subprocess env allowlist via `[security] env_extra_allow` / `env_extra_prefix_allow` to thread credential-manager tokens (1Password, Doppler, Vault, …) without forking
 - 🧩 **Plugin system** — extend with custom engines, transports, and commands
 - 🔌 **Plugin-compatible** — Claude Code plugins detect Untether sessions via `UNTETHER_SESSION` env var, preventing hooks from interfering with Telegram output; works with [PitchDocs](https://github.com/littlebearapps/lba-plugins) and other Claude Code plugins
@@ -119,15 +119,23 @@ The wizard offers three **workflow modes** — pick the one that fits:
 | [Codex](https://github.com/openai/codex) | `npm i -g @openai/codex` | Fast edits, shell commands, quick fixes |
 | [OpenCode](https://github.com/opencode-ai/opencode) | `npm i -g opencode-ai@latest` | 75+ providers via Models.dev, local models |
 | [Pi](https://github.com/mariozechner/pi-coding-agent) | `npm i -g @mariozechner/pi-coding-agent` | Multi-provider auth, conversational |
-| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `npm i -g @google/gemini-cli` | Google Gemini models, configurable approval mode |
-| [Amp](https://ampcode.com) | `npm i -g @sourcegraph/amp` | Sourcegraph's AI coding agent, mode selection |
 
 **Note:** Use your existing Claude or ChatGPT subscription — no extra API keys needed (unless you want API billing).
 
+### Deprecated engines
+
+These two engines still load and run, but are no longer supported and are **targeted for removal in 0.36.0**. Don't start new work on them.
+
+| Engine | Status |
+|--------|--------|
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | **Deprecated.** Gemini CLI reached end-of-life for individual and free Google accounts on **18 June 2026**; Google directs users to [Antigravity CLI](https://antigravity.google). Enterprise / Google Cloud licences may still work, but Untether no longer verifies this. Antigravity support is tracked separately in [#558](https://github.com/littlebearapps/untether/issues/558). |
+| [Amp](https://ampcode.com) | **Deprecated.** Untether's Amp integration is no longer maintained. Amp remotely refuses clients it considers out of date, and Untether does not track that update cadence — so a working setup can stop working without notice. This is a decision about our integration, not about Amp itself. |
+
 ### Engine compatibility
 
-| Feature | Claude Code | Codex CLI | OpenCode | Pi | Gemini CLI | Amp |
+| Feature | Claude Code | Codex CLI | OpenCode | Pi | Gemini CLI⁷ | Amp⁷ |
 |---------|:-----------:|:---------:|:--------:|:--:|:----------:|:---:|
+| **Support status** | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ |
 | **Progress streaming** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Session resume** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Model override** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅¹ |
@@ -157,6 +165,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 ⁴ Toggle via `/config` between full auto (default) and safe (`--ask-for-approval=untrusted`, untrusted tools blocked); pre-run policy, not interactive mid-run approval.
 ⁵ Pi requires `provider = "openai-codex"` in engine config for OAuth subscriptions in headless mode.
 ⁶ AMP requires an explicit thread ID; no "most recent" mode.
+⁷ **Deprecated** — see [Deprecated engines](#deprecated-engines) above. The ticks below describe what the integration does today; they are not a support commitment, and these engines are targeted for removal in 0.36.0.
 
 Claude effort levels: `low`, `medium`, `high`, `xhigh`, `max` (`xhigh` requires Claude Code v2.1.114+).
 
@@ -169,7 +178,7 @@ Claude effort levels: `low`, `medium`, `high`, `xhigh`, `max` (`xhigh` requires 
 | `/cancel` | Stop the running agent |
 | `/agent` | Show or set the engine for this chat |
 | `/model` | Override the model for an engine |
-| `/planmode` | Toggle plan mode (on/auto/off) |
+| `/planmode` | Toggle permission mode (on/plan-auto/auto/off) |
 | `/usage` | Show API costs for the current session (`/usage debug` shows fetch state, OAuth expiry, schema-mismatch counter) |
 | `/export` | Export session transcript |
 | `/browse` | Browse project files |
@@ -251,7 +260,7 @@ untether                         # start (or restart — Ctrl+C first if already
 
 - **Python 3.12+** — `uv python install 3.14`
 - **uv** — `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- At least one agent CLI on PATH: `claude`, `codex`, `opencode`, `pi`, `gemini`, or `amp`
+- At least one agent CLI on PATH: `claude`, `codex`, `opencode`, or `pi` (`gemini` and `amp` still load but are [deprecated](#deprecated-engines))
 
 ---
 
@@ -289,8 +298,8 @@ Full documentation is available in the [`docs/`](https://github.com/littlebearap
 - [Codex](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/codex/exec-json-cheatsheet.md) — profiles, extra args, exec mode
 - [OpenCode](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/opencode/runner.md) — model selection, 75+ providers, local models
 - [Pi](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/pi/runner.md) — multi-provider auth, model and provider selection
-- [Gemini CLI](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/gemini/runner.md) — Google Gemini models, approval mode passthrough
-- [Amp](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/amp/runner.md) — mode selection, thread management
+- [Gemini CLI](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/gemini/runner.md) — ⚠️ deprecated; Google Gemini models, approval mode passthrough
+- [Amp](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/amp/runner.md) — ⚠️ deprecated; mode selection, thread management
 
 ### Reference
 

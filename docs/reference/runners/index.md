@@ -6,6 +6,12 @@ Runner docs describe the **engine-specific** behavior: event shapes, JSON stream
 - Codex: [Exec JSON cheatsheet](codex/exec-json-cheatsheet.md), [Untether events](codex/untether-events.md)
 - OpenCode: [Runner](opencode/runner.md), [Stream JSON cheatsheet](opencode/stream-json-cheatsheet.md), [Untether events](opencode/untether-events.md)
 - Pi: [Runner](pi/runner.md), [Stream JSON cheatsheet](pi/stream-json-cheatsheet.md), [Untether events](pi/untether-events.md)
-- Gemini: [Runner](gemini/runner.md), [Stream JSON cheatsheet](gemini/stream-json-cheatsheet.md), [Untether events](gemini/untether-events.md)
-- AMP: [Runner](amp/runner.md), [Stream JSON cheatsheet](amp/stream-json-cheatsheet.md), [Untether events](amp/untether-events.md)
+
+## ⚠️ Deprecated runners
+
+Both are targeted for **removal in 0.36.0** — security fixes only, no feature
+work, excluded from cross-engine sweeps and the release test matrix.
+
+- Gemini (⚠️ deprecated — upstream EOL for individual accounts 2026-06-18): [Runner](gemini/runner.md), [Stream JSON cheatsheet](gemini/stream-json-cheatsheet.md), [Untether events](gemini/untether-events.md)
+- AMP (⚠️ deprecated — integration unmaintained): [Runner](amp/runner.md), [Stream JSON cheatsheet](amp/stream-json-cheatsheet.md), [Untether events](amp/untether-events.md)
 
