@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+import anyio
 from anyio.abc import TaskGroup
 
 from ..context import RunContext
@@ -17,6 +18,14 @@ logger = get_logger(__name__)
 
 # Type alias matching the run_job() closure signature in loop.py.
 RunJobFn = Callable[..., Awaitable[None]]
+
+# Bounded retry schedule (seconds) for the trigger announce send. A transient
+# resolver/network blip at cron-fire time must not cost the whole dispatch —
+# the session is the payload, the announce is decoration. One DNS hiccup in the
+# 06:45 second silently killed a whole scheduled run (auditor-toolkit#2535);
+# two retries ride out a blip while a real outage still fails loudly within
+# ~35s of the trigger firing.
+SEND_RETRY_DELAYS: tuple[float, ...] = (5.0, 30.0)
 
 
 @dataclass(slots=True)
@@ -119,11 +128,22 @@ class TriggerDispatcher:
         engine_override: str | None,
     ) -> None:
         # Send a notification message so run_job has a message_id to reply to.
+        # Retried on failure per SEND_RETRY_DELAYS before giving up.
         notify_ref = await self.transport.send(
             channel_id=chat_id,
             message=RenderedMessage(text=label),
             options=SendOptions(notify=False),
         )
+        for delay in SEND_RETRY_DELAYS:
+            if notify_ref is not None:
+                break
+            logger.warning("triggers.dispatch.send_retry", label=label, retry_in=delay)
+            await anyio.sleep(delay)
+            notify_ref = await self.transport.send(
+                channel_id=chat_id,
+                message=RenderedMessage(text=label),
+                options=SendOptions(notify=False),
+            )
         if notify_ref is None:
             logger.error("triggers.dispatch.send_failed", label=label)
             return
