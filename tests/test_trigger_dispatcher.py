@@ -413,3 +413,78 @@ async def test_dispatch_webhook_history_failure_does_not_raise(monkeypatch, tmp_
         assert len(run_job.calls) == 1
     finally:
         history.reset_history()
+
+
+@dataclass
+class FlakyTransport(FakeTransport):
+    """Transport whose first N sends fail (return None) before recovering.
+
+    Models the #2535 class: a transient resolver blip at cron-fire time makes
+    the Telegram announce send fail, which previously aborted the whole
+    dispatch — the session was never spawned.
+    """
+
+    fail_first: int = 0
+    attempts: int = 0
+
+    async def send(
+        self,
+        *,
+        channel_id: int | str,
+        message: RenderedMessage,
+        options: SendOptions | None = None,
+    ) -> MessageRef | None:
+        self.attempts += 1
+        if self.attempts <= self.fail_first:
+            return None
+        return await super().send(
+            channel_id=channel_id, message=message, options=options
+        )
+
+
+@pytest.mark.anyio
+async def test_cron_dispatch_retries_transient_send_failure(monkeypatch):
+    """A transient announce-send failure is retried, and the job still runs."""
+    from untether.triggers import dispatcher as dispatcher_mod
+
+    monkeypatch.setattr(dispatcher_mod, "SEND_RETRY_DELAYS", (0.0, 0.0))
+    transport = FlakyTransport(fail_first=2)
+    run_job = RunJobCapture()
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job,
+            transport=transport,
+            default_chat_id=100,
+            task_group=tg,
+        )
+        await dispatcher.dispatch_cron(_make_cron())
+        await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+
+    assert transport.attempts == 3  # 1 initial + 2 retries
+    assert len(run_job.calls) == 1  # the session is the payload — it spawned
+
+
+@pytest.mark.anyio
+async def test_cron_dispatch_aborts_after_retry_exhaustion(monkeypatch):
+    """A persistent send outage still fails loudly after the bounded retries."""
+    from untether.triggers import dispatcher as dispatcher_mod
+
+    monkeypatch.setattr(dispatcher_mod, "SEND_RETRY_DELAYS", (0.0, 0.0))
+    transport = FlakyTransport(fail_first=99)
+    run_job = RunJobCapture()
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job,
+            transport=transport,
+            default_chat_id=100,
+            task_group=tg,
+        )
+        await dispatcher.dispatch_cron(_make_cron())
+        await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+
+    assert transport.attempts == 3  # bounded: 1 initial + len(SEND_RETRY_DELAYS)
+    assert run_job.calls == []
